@@ -12,14 +12,16 @@ import {
 } from './codex-auth.js'
 import type { AccountCredentials } from './types.js'
 
-// OpenAI OAuth endpoints (same as official Codex CLI)
 const OPENAI_ISSUER = 'https://auth.openai.com'
 const AUTHORIZE_URL = `${OPENAI_ISSUER}/oauth/authorize`
 const TOKEN_URL = `${OPENAI_ISSUER}/oauth/token`
 const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
-const REDIRECT_PORT = 1455
-const REDIRECT_URI = `http://localhost:${REDIRECT_PORT}/auth/callback`
+const DEFAULT_REDIRECT_PORTS = [1455, 1456, 1457, 1458, 1459]
 const SCOPES = ['openid', 'profile', 'email', 'offline_access']
+
+function getRedirectUri(port: number): string {
+  return `http://localhost:${port}/auth/callback`
+}
 
 interface TokenResponse {
   access_token: string
@@ -33,14 +35,19 @@ interface AuthorizationFlow {
   pkce: { verifier: string; challenge: string }
   state: string
   url: string
+  redirectUri: string
+  port: number
 }
 
-export async function createAuthorizationFlow(): Promise<AuthorizationFlow> {
+export async function createAuthorizationFlow(port?: number): Promise<AuthorizationFlow> {
   const pkce = await generatePKCE()
   const state = randomBytes(16).toString('hex')
+  const redirectPort = port || DEFAULT_REDIRECT_PORTS[0]
+  const redirectUri = getRedirectUri(redirectPort)
+  
   const authUrl = new URL(AUTHORIZE_URL)
   authUrl.searchParams.set('client_id', CLIENT_ID)
-  authUrl.searchParams.set('redirect_uri', REDIRECT_URI)
+  authUrl.searchParams.set('redirect_uri', redirectUri)
   authUrl.searchParams.set('response_type', 'code')
   authUrl.searchParams.set('scope', SCOPES.join(' '))
   authUrl.searchParams.set('code_challenge', pkce.challenge)
@@ -51,19 +58,51 @@ export async function createAuthorizationFlow(): Promise<AuthorizationFlow> {
   authUrl.searchParams.set('codex_cli_simplified_flow', 'true')
   authUrl.searchParams.set('originator', 'codex_cli_rs')
 
-  return { pkce, state, url: authUrl.toString() }
+  return { pkce, state, url: authUrl.toString(), redirectUri, port: redirectPort }
+}
+
+function tryListenOnPort(server: http.Server, port: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onError = (err: NodeJS.ErrnoException) => {
+      server.off('error', onError)
+      reject(err)
+    }
+    server.on('error', onError)
+    server.listen(port, () => {
+      server.off('error', onError)
+      resolve()
+    })
+  })
+}
+
+async function findAvailablePort(
+  server: http.Server,
+  ports: number[]
+): Promise<number> {
+  for (const port of ports) {
+    try {
+      await tryListenOnPort(server, port)
+      return port
+    } catch (err: any) {
+      if (err.code === 'EADDRINUSE') {
+        continue
+      }
+      throw err
+    }
+  }
+  throw new Error(`All ports ${ports.join(', ')} are in use. Stop Codex CLI if running.`)
 }
 
 export async function loginAccount(
   alias: string,
   flow?: AuthorizationFlow
 ): Promise<AccountCredentials> {
-  const activeFlow = flow ?? await createAuthorizationFlow()
-  const { pkce, state } = activeFlow
+  const ports = DEFAULT_REDIRECT_PORTS
+  let activeFlow = flow
+  let server: http.Server | null = null
+  let actualPort: number
 
-  return new Promise((resolve, reject) => {
-    let server: http.Server | null = null
-
+  return new Promise(async (resolve, reject) => {
     const cleanup = () => {
       if (server) {
         server.close()
@@ -78,6 +117,14 @@ export async function loginAccount(
         return
       }
 
+      if (!activeFlow) {
+        res.writeHead(500)
+        res.end('No active flow')
+        cleanup()
+        reject(new Error('No active flow'))
+        return
+      }
+
       const parsedUrl = url.parse(req.url, true)
       const code = parsedUrl.query.code as string
       const returnedState = parsedUrl.query.state as string | undefined
@@ -89,7 +136,7 @@ export async function loginAccount(
         reject(new Error('No authorization code'))
         return
       }
-      if (returnedState && returnedState !== state) {
+      if (returnedState && returnedState !== activeFlow.state) {
         res.writeHead(400)
         res.end('Invalid state')
         cleanup()
@@ -98,7 +145,6 @@ export async function loginAccount(
       }
 
       try {
-        // Exchange code for tokens
         const tokenRes = await fetch(TOKEN_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -106,8 +152,8 @@ export async function loginAccount(
             grant_type: 'authorization_code',
             client_id: CLIENT_ID,
             code,
-            code_verifier: pkce.verifier,
-            redirect_uri: REDIRECT_URI
+            code_verifier: activeFlow.pkce.verifier,
+            redirect_uri: activeFlow.redirectUri
           })
         })
 
@@ -178,22 +224,23 @@ export async function loginAccount(
       }
     })
 
-    server.listen(REDIRECT_PORT, () => {
+    try {
+      actualPort = await findAvailablePort(server, ports)
+      
+      if (!activeFlow || activeFlow.port !== actualPort) {
+        activeFlow = await createAuthorizationFlow(actualPort)
+      }
+
       console.log(`\n[multi-auth] Login for account "${alias}"`)
       console.log(`[multi-auth] Open this URL in your browser:\n`)
       console.log(`  ${activeFlow.url}\n`)
-      console.log(`[multi-auth] Waiting for callback on port ${REDIRECT_PORT}...`)
-    })
+      console.log(`[multi-auth] Waiting for callback on port ${actualPort}...`)
+    } catch (err) {
+      cleanup()
+      reject(err)
+      return
+    }
 
-    server.on('error', (err: NodeJS.ErrnoException) => {
-      if (err.code === 'EADDRINUSE') {
-        reject(new Error(`Port ${REDIRECT_PORT} is in use. Stop Codex CLI if running.`))
-      } else {
-        reject(err)
-      }
-    })
-
-    // Timeout after 5 minutes
     setTimeout(() => {
       cleanup()
       reject(new Error('Login timeout - no callback received'))
@@ -221,23 +268,21 @@ export async function refreshToken(alias: string): Promise<AccountCredentials | 
       })
     })
 
-	    if (!tokenRes.ok) {
-	      console.error(`[multi-auth] Refresh failed for ${alias}: ${tokenRes.status}`)
+    if (!tokenRes.ok) {
+      console.error(`[multi-auth] Refresh failed for ${alias}: ${tokenRes.status}`)
 
-	      // If the refresh token is invalid/expired, mark this account invalid so
-	      // rotation can keep working without repeatedly selecting a broken account.
-	      if (tokenRes.status === 401 || tokenRes.status === 403) {
-	        try {
-	          updateAccount(alias, {
-	            authInvalid: true,
-	            authInvalidatedAt: Date.now()
-	          })
-	        } catch {
-	          // ignore
-	        }
-	      }
-	      return null
-	    }
+      if (tokenRes.status === 401 || tokenRes.status === 403) {
+        try {
+          updateAccount(alias, {
+            authInvalid: true,
+            authInvalidatedAt: Date.now()
+          })
+        } catch {
+          // ignore
+        }
+      }
+      return null
+    }
 
     const tokens = (await tokenRes.json()) as TokenResponse
     const accessClaims = decodeJwtPayload(tokens.access_token)
@@ -272,7 +317,6 @@ export async function ensureValidToken(alias: string): Promise<string | null> {
 
   if (!account) return null
 
-  // Refresh if expiring within 5 minutes
   const bufferMs = 5 * 60 * 1000
   if (account.expiresAt < Date.now() + bufferMs) {
     console.log(`[multi-auth] Refreshing token for ${alias}`)

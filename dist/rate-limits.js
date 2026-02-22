@@ -34,6 +34,15 @@ function parseTimestamp(value) {
         return parsed;
     return undefined;
 }
+function parseHumanDate(value) {
+    const normalized = value
+        .replace(/\b(\d{1,2})(st|nd|rd|th)\b/gi, '$1')
+        .trim();
+    const parsed = Date.parse(normalized);
+    if (!Number.isNaN(parsed))
+        return parsed;
+    return undefined;
+}
 function matchWindowKey(headerName) {
     for (const entry of WINDOW_PATTERNS) {
         if (entry.patterns.some((pattern) => headerName.includes(pattern))) {
@@ -113,5 +122,82 @@ export function mergeRateLimits(existing, update) {
         fiveHour: { ...(existing?.fiveHour || {}), ...(update.fiveHour || {}) },
         weekly: { ...(existing?.weekly || {}), ...(update.weekly || {}) }
     };
+}
+export function parseRetryAfterHeader(retryAfter, now = Date.now()) {
+    if (!retryAfter)
+        return undefined;
+    const trimmed = retryAfter.trim();
+    if (!trimmed)
+        return undefined;
+    const asNumber = Number(trimmed);
+    if (Number.isFinite(asNumber) && asNumber >= 0) {
+        return now + asNumber * 1000;
+    }
+    const asDate = Date.parse(trimmed);
+    if (!Number.isNaN(asDate))
+        return asDate;
+    return undefined;
+}
+export function parseRateLimitResetFromError(text, now = Date.now()) {
+    if (!text)
+        return undefined;
+    const retryAfterMatch = text.match(/(?:retry[\s-]*after|try again in)\s*(\d+)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\b/i);
+    if (retryAfterMatch) {
+        const amount = Number(retryAfterMatch[1]);
+        const unit = retryAfterMatch[2].toLowerCase();
+        if (Number.isFinite(amount) && amount >= 0) {
+            if (unit.startsWith('h'))
+                return now + amount * 60 * 60 * 1000;
+            if (unit.startsWith('m'))
+                return now + amount * 60 * 1000;
+            return now + amount * 1000;
+        }
+    }
+    const tryAgainAtMatch = text.match(/try again at\s+([^\n.]+)/i);
+    if (tryAgainAtMatch?.[1]) {
+        const resetAt = parseHumanDate(tryAgainAtMatch[1]);
+        if (resetAt !== undefined)
+            return resetAt;
+    }
+    return undefined;
+}
+export function isRateLimitErrorText(text) {
+    if (!text)
+        return false;
+    const normalized = text.toLowerCase();
+    return (normalized.includes('rate limit') ||
+        normalized.includes('usage limit') ||
+        normalized.includes("you've hit your usage limit") ||
+        normalized.includes('too many requests') ||
+        normalized.includes('try again at') ||
+        normalized.includes('retry after'));
+}
+export function getBlockingRateLimitResetAt(rateLimits, now = Date.now()) {
+    if (!rateLimits)
+        return undefined;
+    const windows = [
+        rateLimits.fiveHour,
+        rateLimits.weekly
+    ];
+    const exhaustedResets = [];
+    const futureResets = [];
+    for (const window of windows) {
+        if (!window || typeof window.resetAt !== 'number' || window.resetAt <= now) {
+            continue;
+        }
+        futureResets.push(window.resetAt);
+        if (typeof window.remaining === 'number' && window.remaining <= 0) {
+            exhaustedResets.push(window.resetAt);
+        }
+    }
+    if (exhaustedResets.length > 0) {
+        // If multiple windows are exhausted, wait for the last one to reset.
+        return Math.max(...exhaustedResets);
+    }
+    if (futureResets.length > 0) {
+        // Conservative fallback when backend says limited but remaining counters are absent.
+        return Math.max(...futureResets);
+    }
+    return undefined;
 }
 //# sourceMappingURL=rate-limits.js.map

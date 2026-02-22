@@ -11,13 +11,21 @@ import { getCodexAuthPath, getCodexAuthStatus, syncCodexAuthFile, writeCodexAuth
 import { getStoreStatus, listAccounts, loadStore, removeAccount, updateAccount } from './store.js'
 import { getRefreshQueueState, startRefreshQueue, stopRefreshQueue } from './refresh-queue.js'
 import { getLogPath, logError, logInfo, readLogTail } from './logger.js'
-import type { AccountCredentials, RateLimitWindow } from './types.js'
+import { getForceState, activateForce, clearForce, isForceActive, getRemainingForceTimeMs, formatForceDuration } from './force-mode.js'
+import { getSettings, getRuntimeSettings, updateSettings, isFeatureEnabled } from './settings.js'
+import { Errors } from './errors.js'
+import type { AccountCredentials, RateLimitWindow, LimitsConfidence, RotationSettings, WeightPreset } from './types.js'
 
 const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 3434
+const LOCALHOST_HOST_PATTERN = /^(127\.0\.0\.1|::1|localhost)$/i
 const SYNC_INTERVAL_MS = 3000
 const SYNC_DEBOUNCE_MS = 600
 const ANTIGRAVITY_ACCOUNTS_FILE = path.join(os.homedir(), '.config', 'opencode', 'antigravity-accounts.json')
+
+export function isLocalhostHost(host: string): boolean {
+  return LOCALHOST_HOST_PATTERN.test(host.trim())
+}
 
 const execAsync = promisify(exec)
 
@@ -253,6 +261,88 @@ const HTML = `<!doctype html>
       .status-success { background: rgba(55, 211, 153, 0.15); color: var(--success); }
       .status-error { background: rgba(255, 107, 107, 0.18); color: var(--danger); }
       .status-stopped { background: rgba(249, 115, 22, 0.2); color: var(--warning); }
+      /* Phase C: Confidence badge styles */
+      .confidence-badge {
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        padding: 2px 6px;
+        border-radius: 6px;
+        font-weight: 700;
+        margin-left: 6px;
+      }
+      .confidence-fresh { background: rgba(55, 211, 153, 0.15); color: var(--success); }
+      .confidence-stale { background: rgba(255, 181, 71, 0.2); color: var(--accent); }
+      .confidence-error { background: rgba(255, 107, 107, 0.18); color: var(--danger); }
+      .confidence-unknown { background: rgba(255,255,255,0.08); color: var(--muted); }
+      
+      /* Phase D: iOS-style toggle switch */
+      .toggle-switch {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        cursor: pointer;
+      }
+      .toggle-switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+      .toggle-slider {
+        position: relative;
+        width: 44px;
+        height: 24px;
+        background: rgba(255,255,255,0.1);
+        border-radius: 24px;
+        transition: background 0.2s;
+      }
+      .toggle-slider:before {
+        content: '';
+        position: absolute;
+        height: 20px;
+        width: 20px;
+        left: 2px;
+        bottom: 2px;
+        background: white;
+        border-radius: 50%;
+        transition: transform 0.2s;
+      }
+      .toggle-switch input:checked + .toggle-slider {
+        background: var(--success);
+      }
+      .toggle-switch input:checked + .toggle-slider:before {
+        transform: translateX(20px);
+      }
+      .toggle-switch input:disabled + .toggle-slider {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .toggle-switch.updating .toggle-slider {
+        background: var(--accent);
+        animation: pulse 1s infinite;
+      }
+      .toggle-switch.error .toggle-slider {
+        background: var(--danger);
+      }
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+      }
+      .toggle-label {
+        font-size: 13px;
+        color: var(--text);
+        font-weight: 500;
+      }
+      .account-controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+        padding: 12px 0;
+        border-top: 1px solid rgba(255,255,255,0.06);
+        border-bottom: 1px solid rgba(255,255,255,0.06);
+      }
       .account-meta {
         display: grid;
         gap: 6px;
@@ -414,6 +504,103 @@ const HTML = `<!doctype html>
         grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
         margin: 12px 0;
       }
+      /* Phase E: Force Mode Toggle Styles */
+      .force-toggle-container {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .force-mode-controls {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+      .force-strategy-inline {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .force-strategy-inline label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .strategy-help {
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        border: 1px solid rgba(255,255,255,0.2);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 11px;
+        color: var(--muted);
+        cursor: help;
+      }
+      .toggle-switch {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        cursor: pointer;
+      }
+      .toggle-switch input {
+        display: none;
+      }
+      .toggle-slider {
+        width: 44px;
+        height: 24px;
+        background: rgba(255,255,255,0.1);
+        border-radius: 12px;
+        position: relative;
+        transition: background 0.2s;
+      }
+      .toggle-slider::before {
+        content: '';
+        position: absolute;
+        width: 20px;
+        height: 20px;
+        background: var(--text);
+        border-radius: 50%;
+        top: 2px;
+        left: 2px;
+        transition: transform 0.2s;
+      }
+      .toggle-switch input:checked + .toggle-slider {
+        background: var(--accent);
+      }
+      .toggle-switch input:checked + .toggle-slider::before {
+        transform: translateX(20px);
+      }
+      .toggle-switch input:disabled + .toggle-slider {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .toggle-label {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .toggle-switch input:checked ~ .toggle-label {
+        color: var(--accent);
+      }
+      #forceAliasSelect {
+        background: var(--panel-2);
+        border: 1px solid rgba(255,255,255,0.1);
+        border-radius: 8px;
+        padding: 8px 12px;
+        color: var(--text);
+        font-family: inherit;
+        font-size: 13px;
+      }
+      #rotationStrategySelect {
+        background: var(--panel-2);
+        border: 1px solid rgba(255,255,255,0.1);
+        border-radius: 8px;
+        padding: 8px 12px;
+        color: var(--text);
+        font-family: inherit;
+        font-size: 13px;
+      }
       @media (max-width: 720px) {
         header { padding: 26px 18px 10px; }
         .container { padding: 0 16px 28px; }
@@ -462,7 +649,44 @@ const HTML = `<!doctype html>
         </div>
       </section>
       <section class="accounts" id="accounts"></section>
+      
+      <!-- Phase E: Force Mode Section -->
       <section class="panel">
+        <div class="logs-header">
+          <div>
+            <div style="font-size: 16px; font-weight: 600;">Force Mode</div>
+            <div class="notice">Pin rotation to a specific account for 24 hours</div>
+          </div>
+          <div class="force-mode-controls" id="forceModeControls">
+            <div class="force-toggle-container" id="forceToggleContainer">
+              <label class="toggle-switch" id="forceToggleLabel" title="">
+                <input type="checkbox" id="forceToggle" />
+                <span class="toggle-slider"></span>
+                <span class="toggle-label" id="forceToggleText">Off</span>
+              </label>
+              <span id="forceModeHelpIcon" class="strategy-help" title="">?</span>
+              <select id="forceAliasSelect" style="display: none; margin-left: 12px;" title="">
+                <option value="">Select account...</option>
+              </select>
+            </div>
+            <div class="force-strategy-inline">
+              <label for="rotationStrategySelect">Strategy</label>
+              <select id="rotationStrategySelect" title="">
+                <option value="round-robin" title="Cycle through enabled accounts in order.">round-robin</option>
+                <option value="least-used" title="Prefer the enabled account with the lowest usage count.">least-used</option>
+                <option value="random" title="Randomly pick from healthy accounts each request.">random</option>
+                <option value="weighted-round-robin" title="Split requests by your account weights (example: 0.70/0.20/0.10 sends about 70%/20%/10%). Limited or disabled accounts are skipped automatically.">weighted-round-robin</option>
+              </select>
+              <span id="rotationStrategyHelpIcon" class="strategy-help" title="">?</span>
+            </div>
+          </div>
+        </div>
+        <div id="forceStatus" class="notice"></div>
+        <div id="rotationStrategyStatus" class="notice"></div>
+      </section>
+      
+      <!-- Phase G: Antigravity section - conditionally rendered based on feature flag -->
+      <section class="panel" id="antigravitySection" style="display: none;">
         <div class="logs-header">
           <div>
             <div style="font-size: 16px; font-weight: 600;">Antigravity accounts</div>
@@ -524,14 +748,76 @@ const HTML = `<!doctype html>
       const refreshAgLimitsAllBtn = document.getElementById('refreshAgLimitsAll')
       const copyAgPathBtn = document.getElementById('copyAgPath')
       const copyAgLoginBtn = document.getElementById('copyAgLogin')
+      
+      // Phase G: Antigravity section element
+      const antigravitySection = document.getElementById('antigravitySection')
+      
+      // Phase E: Force Mode elements
+      const forceToggle = document.getElementById('forceToggle')
+      const forceToggleText = document.getElementById('forceToggleText')
+      const forceToggleLabel = document.getElementById('forceToggleLabel')
+      const forceModeHelpIcon = document.getElementById('forceModeHelpIcon')
+      const forceAliasSelect = document.getElementById('forceAliasSelect')
+      const forceStatus = document.getElementById('forceStatus')
+      const rotationStrategySelect = document.getElementById('rotationStrategySelect')
+      const rotationStrategyStatus = document.getElementById('rotationStrategyStatus')
+      const rotationStrategyHelpIcon = document.getElementById('rotationStrategyHelpIcon')
 
       let latestState = null
       let pollTimer = null
+      const rotationStrategyHelp = {
+        'round-robin': 'Cycle through enabled accounts in order.',
+        'least-used': 'Prefer the enabled account with the lowest usage count.',
+        'random': 'Randomly pick from healthy accounts each request.',
+        'weighted-round-robin': 'Split requests by your account weights (example: 0.70/0.20/0.10 sends about 70%/20%/10%). Limited or disabled accounts are skipped automatically.'
+      }
+      const forceModeHelpText = 'Force mode pins all requests to one selected account for up to 24 hours. While force mode is on, rotation strategy is paused.'
+      const forceAliasHelpText = 'Choose the account that force mode should pin.'
 
       function showToast(text) {
         toast.textContent = text
         toast.classList.add('show')
         setTimeout(() => toast.classList.remove('show'), 2200)
+      }
+
+      function describeRotationStrategy(strategy) {
+        return rotationStrategyHelp[strategy] || 'Rotation strategy controls how the next account is selected.'
+      }
+
+      function renderControlHelp(strategy) {
+        if (forceToggleLabel) {
+          forceToggleLabel.title = forceModeHelpText
+        }
+        if (forceToggle) {
+          forceToggle.title = forceModeHelpText
+        }
+        if (forceModeHelpIcon) {
+          forceModeHelpIcon.title = forceModeHelpText
+        }
+        if (forceAliasSelect) {
+          forceAliasSelect.title = forceAliasHelpText
+        }
+        if (rotationStrategySelect) {
+          rotationStrategySelect.title = describeRotationStrategy(strategy)
+        }
+      }
+
+      function renderRotationStrategyHelp(strategy) {
+        const description = describeRotationStrategy(strategy)
+        const forceNotice = latestState?.force?.active
+          ? ' Saved now, active after force mode is turned off.'
+          : ' Active now while force mode is off.'
+        const tooltip = description + ' Used when force mode is off.'
+        renderControlHelp(strategy)
+        if (rotationStrategySelect) {
+          rotationStrategySelect.title = tooltip
+        }
+        if (rotationStrategyHelpIcon) {
+          rotationStrategyHelpIcon.title = tooltip
+        }
+        if (rotationStrategyStatus) {
+          rotationStrategyStatus.textContent = 'Rotation strategy: ' + strategy + ' — ' + description + forceNotice
+        }
       }
 
       async function api(path, options) {
@@ -586,8 +872,18 @@ const HTML = `<!doctype html>
         return Math.round((window.remaining / window.limit) * 100)
       }
 
-      function renderLimit(window, label, history) {
-        if (!window) return ''
+      function renderLimit(window, label, history, confidence) {
+        // Phase C: Show "unknown" for missing data
+        if (!window || confidence === 'unknown') {
+          return \`
+            <div class="limit-card">
+              <strong>\${label}</strong>
+              <span>Remaining: unknown</span><br />
+              <span>Reset: unknown</span><br />
+              <span>Updated: unknown</span>
+            </div>
+          \`
+        }
         const remaining = window.remaining ?? '-'
         const limit = window.limit ?? '-'
         const isPercent = typeof remaining === 'number' && limit === 100
@@ -595,9 +891,15 @@ const HTML = `<!doctype html>
         const reset = window.resetAt ? formatDate(window.resetAt) : 'unknown'
         const updated = window.updatedAt ? formatDate(window.updatedAt) : 'unknown'
         const spark = renderSparkline(history, label === '5h limit' ? 'fiveHour' : 'weekly')
+        
+        // Phase C: Add confidence indicator
+        const confidenceBadge = confidence && confidence !== 'fresh' 
+          ? \`<span class="confidence-badge confidence-\${confidence}">\${confidence}</span>\` 
+          : ''
+        
         return \`
           <div class="limit-card">
-            <strong>\${label}</strong>
+            <strong>\${label} \${confidenceBadge}</strong>
             <span>Remaining: \${remainingText}</span><br />
             <span>Reset: \${reset}</span><br />
             <span>Updated: \${updated}</span>
@@ -755,8 +1057,8 @@ const HTML = `<!doctype html>
           const tags = (acc.tags || []).map((tag) => \`<span class="tag-chip">\${escapeHtml(tag)}</span>\`).join('')
           const notes = acc.notes ? escapeHtml(acc.notes) : 'No notes yet.'
           const limitBlocks = [
-            renderLimit(acc.rateLimits?.fiveHour, '5h limit', acc.rateLimitHistory),
-            renderLimit(acc.rateLimits?.weekly, 'Weekly limit', acc.rateLimitHistory)
+            renderLimit(acc.rateLimits?.fiveHour, '5h limit', acc.rateLimitHistory, acc.limitsConfidence),
+            renderLimit(acc.rateLimits?.weekly, 'Weekly limit', acc.rateLimitHistory, acc.limitsConfidence)
           ].join('')
 
           return \`
@@ -790,10 +1092,20 @@ const HTML = `<!doctype html>
                 <textarea data-field="notes" rows="3" placeholder="Notes">\${escapeHtml(acc.notes || '')}</textarea>
                 <button class="secondary small" data-action="save-meta" data-alias="\${escapeHtml(acc.alias)}">Save</button>
               </div>
+              <!-- Phase D: Account controls with Enabled switch and Re-auth -->
+              <div class="account-controls">
+                <label class="toggle-switch" data-alias="\${escapeHtml(acc.alias)}">
+                  <input type="checkbox" \${acc.enabled !== false ? 'checked' : ''} data-action="toggle-enabled" data-alias="\${escapeHtml(acc.alias)}" />
+                  <span class="toggle-slider"></span>
+                  <span class="toggle-label">\${acc.enabled !== false ? 'Enabled' : 'Disabled'}</span>
+                </label>
+                <button class="secondary" data-action="reauth" data-alias="\${escapeHtml(acc.alias)}">Re-auth</button>
+              </div>
               <div class="card-actions">
                 <button data-action="switch" data-alias="\${escapeHtml(acc.alias)}">Use on device</button>
                 <button class="secondary" data-action="refresh-token" data-alias="\${escapeHtml(acc.alias)}">Refresh token</button>
                 <button class="secondary" data-action="refresh" data-alias="\${escapeHtml(acc.alias)}">Refresh limits</button>
+                <!-- Phase D: Remove button kept, but disable mechanism is now via toggle -->
                 <button class="danger" data-action="remove" data-alias="\${escapeHtml(acc.alias)}">Remove</button>
               </div>
             </div>
@@ -878,6 +1190,20 @@ const HTML = `<!doctype html>
       }
 
       function renderAntigravity(state) {
+        // Phase G: Check if antigravity feature is enabled
+        const featureFlags = state.featureFlags || {}
+        const isEnabled = featureFlags.antigravityEnabled === true
+        
+        // Show/hide antigravity section based on feature flag
+        if (antigravitySection) {
+          antigravitySection.style.display = isEnabled ? 'block' : 'none'
+        }
+        
+        // If disabled, don't render any antigravity content
+        if (!isEnabled) {
+          return
+        }
+        
         const ag = state.antigravity || {}
         if (agPathEl) {
           agPathEl.textContent = ag.path ? 'Path: ' + ag.path : ''
@@ -1027,6 +1353,7 @@ const HTML = `<!doctype html>
         renderLogin(state)
         renderAntigravity(state)
         updatePolling(state.queue)
+        await renderForceMode()
       }
 
       accountsEl.addEventListener('click', async (event) => {
@@ -1069,7 +1396,7 @@ const HTML = `<!doctype html>
           return
         }
         if (action === 'save-meta') {
-          const editor = document.querySelector(\`.meta-editor[data-editor="\${CSS.escape(alias)}"]\`)
+          const editor = document.querySelector('.meta-editor[data-editor="' + CSS.escape(alias) + '"]')
           if (!editor) return
           const tagsInput = editor.querySelector('input[data-field="tags"]')
           const notesInput = editor.querySelector('textarea[data-field="notes"]')
@@ -1081,6 +1408,104 @@ const HTML = `<!doctype html>
           })
           showToast('Saved tags/notes')
           await refreshState()
+        }
+        
+        // Phase D: Toggle enabled state
+        if (action === 'toggle-enabled') {
+          const checkbox = target
+          const enabled = checkbox.checked
+          const toggleLabel = checkbox.closest('.toggle-switch')?.querySelector('.toggle-label')
+          
+          // Phase D: Double-submit protection - disable during request
+          checkbox.disabled = true
+          if (toggleLabel) {
+            toggleLabel.textContent = enabled ? 'Enabling...' : 'Disabling...'
+          }
+          
+          try {
+            const result = await api(\`/api/accounts/\${encodeURIComponent(alias)}/enabled\`, {
+              method: 'PUT',
+              body: JSON.stringify({ enabled })
+            })
+            showToast(result.enabled ? 'Account enabled' : 'Account disabled')
+            if (toggleLabel) {
+              toggleLabel.textContent = result.enabled ? 'Enabled' : 'Disabled'
+            }
+          } catch (err) {
+            // Revert checkbox on error
+            checkbox.checked = !enabled
+            if (toggleLabel) {
+              toggleLabel.textContent = !enabled ? 'Enabled' : 'Disabled'
+            }
+            showToast('Error: ' + err.message)
+          } finally {
+            checkbox.disabled = false
+          }
+          await refreshState()
+          return
+        }
+        
+        // Phase D: Re-auth action
+        if (action === 'reauth') {
+          const button = target
+          const originalText = button.textContent
+          button.disabled = true
+          button.textContent = 'Starting...'
+          
+          try {
+            const result = await api(\`/api/accounts/\${encodeURIComponent(alias)}/reauth\`, {
+              method: 'POST',
+              body: JSON.stringify({ actor: 'dashboard' })
+            })
+            
+            if (result.url) {
+              showToast('Opening OAuth flow...')
+              window.open(result.url, '_blank')
+            } else {
+              showToast('Re-auth started')
+            }
+            
+            button.textContent = 'In Progress...'
+            
+            // Poll for completion
+            let attempts = 0
+            const maxAttempts = 60 // 2 minutes at 2 second intervals
+            const pollInterval = setInterval(async () => {
+              attempts++
+              const state = await api('/api/state')
+              const account = state.accounts?.find(a => a.alias === alias)
+              
+              if (account && account.lastRefresh) {
+                const lastRefreshTime = new Date(account.lastRefresh).getTime()
+                if (lastRefreshTime > Date.now() - 60000) { // refreshed in last minute
+                  clearInterval(pollInterval)
+                  button.textContent = 'Success!'
+                  showToast('Re-auth completed successfully')
+                  setTimeout(() => {
+                    button.disabled = false
+                    button.textContent = originalText
+                  }, 2000)
+                  await refreshState()
+                }
+              }
+              
+              if (attempts >= maxAttempts) {
+                clearInterval(pollInterval)
+                button.textContent = 'Timed Out'
+                showToast('Re-auth timed out. Check logs.')
+                setTimeout(() => {
+                  button.disabled = false
+                  button.textContent = originalText
+                }, 2000)
+              }
+            }, 2000)
+            
+          } catch (err) {
+            showToast('Error: ' + err.message)
+            button.disabled = false
+            button.textContent = originalText
+          }
+          return
         }
       })
 
@@ -1208,6 +1633,130 @@ const HTML = `<!doctype html>
         if (latestState) renderAccounts(latestState)
       })
 
+      // Phase E: Force Mode UI functions
+      async function renderForceMode() {
+        try {
+          const forceData = await api('/api/force', { method: 'GET' })
+          
+          if (forceToggle && forceToggleText && forceAliasSelect && forceStatus) {
+            // Update toggle state
+            forceToggle.checked = forceData.active
+            forceToggle.disabled = false
+            
+            if (forceData.active) {
+              forceToggleText.textContent = 'On (' + forceData.remainingTime + ')'
+              forceStatus.innerHTML = 'Force mode active for <strong>' + escapeHtml(forceData.alias) + '</strong> — ' + escapeHtml(forceData.remainingTime) + ' remaining'
+              forceAliasSelect.style.display = 'none'
+            } else {
+              forceToggleText.textContent = 'Off'
+              forceStatus.textContent = 'Force mode disabled. Rotation will use normal strategy.'
+              
+              // Populate alias select if not active
+              if (latestState && latestState.accounts) {
+                const enabledAccounts = latestState.accounts.filter(acc => acc.enabled !== false)
+                forceAliasSelect.innerHTML = '<option value="">Select account...</option>' +
+                  enabledAccounts.map(acc => '<option value="' + escapeHtml(acc.alias) + '">' + escapeHtml(acc.alias) + '</option>').join('')
+              }
+            }
+          }
+
+          if (rotationStrategySelect) {
+            const strategy = latestState?.rotationStrategy || 'round-robin'
+            rotationStrategySelect.value = strategy
+            rotationStrategySelect.disabled = false
+            renderRotationStrategyHelp(strategy)
+          }
+        } catch (err) {
+          console.error('Failed to load force state:', err)
+          if (forceStatus) {
+            forceStatus.textContent = 'Failed to load force mode state'
+          }
+          if (rotationStrategyStatus) {
+            rotationStrategyStatus.textContent = 'Failed to load strategy'
+          }
+        }
+      }
+
+      // Force toggle event listener
+      if (forceToggle) {
+        forceToggle.addEventListener('change', async () => {
+          const isChecked = forceToggle.checked
+          forceToggle.disabled = true
+          
+          try {
+            if (isChecked) {
+              // Show alias selector when enabling
+              if (forceAliasSelect) {
+                forceAliasSelect.style.display = 'inline-block'
+                forceToggleText.textContent = 'Select account...'
+                forceToggle.disabled = false
+              }
+            } else {
+              // Disable force mode
+              await api('/api/force/clear', { method: 'POST' })
+              showToast('Force mode disabled')
+              await renderForceMode()
+            }
+          } catch (err) {
+            showToast('Error: ' + err.message)
+            forceToggle.checked = !isChecked
+            forceToggle.disabled = false
+          }
+        })
+      }
+
+      // Force alias selection
+      if (forceAliasSelect) {
+        forceAliasSelect.addEventListener('change', async () => {
+          const alias = forceAliasSelect.value
+          if (!alias) return
+          
+          forceAliasSelect.disabled = true
+          
+          try {
+            await api('/api/force', { 
+              method: 'POST', 
+              body: JSON.stringify({ alias, actor: 'dashboard' }) 
+            })
+            showToast('Force mode enabled for ' + alias)
+            forceAliasSelect.style.display = 'none'
+            await renderForceMode()
+          } catch (err) {
+            showToast('Error: ' + err.message)
+            forceAliasSelect.value = ''
+          } finally {
+            forceAliasSelect.disabled = false
+          }
+        })
+      }
+
+      if (rotationStrategySelect) {
+        rotationStrategySelect.addEventListener('change', async () => {
+          const previous = latestState?.rotationStrategy || 'round-robin'
+          const rotationStrategy = rotationStrategySelect.value
+          renderRotationStrategyHelp(rotationStrategy)
+          rotationStrategySelect.disabled = true
+          try {
+            await api('/api/settings', {
+              method: 'PUT',
+              body: JSON.stringify({
+                rotationStrategy,
+                actor: 'dashboard'
+              })
+            })
+            showToast('Rotation strategy set to ' + rotationStrategy)
+            await refreshState()
+          } catch (err) {
+            rotationStrategySelect.value = previous
+            renderRotationStrategyHelp(previous)
+            showToast('Error: ' + err.message)
+          } finally {
+            rotationStrategySelect.disabled = false
+          }
+        })
+      }
+
+      renderControlHelp('round-robin')
       refreshState().catch((err) => {
         console.error(err)
         notice.textContent = 'Failed to load state.'
@@ -1240,7 +1789,9 @@ async function readJsonBody(req: http.IncomingMessage): Promise<Record<string, a
       data += chunk
       if (data.length > 1_000_000) {
         req.destroy()
-        reject(new Error('Payload too large'))
+        const payloadError = new Error('Payload too large') as Error & { code?: string }
+        payloadError.code = 'PAYLOAD_TOO_LARGE'
+        reject(payloadError)
       }
     })
     req.on('end', () => {
@@ -1250,8 +1801,10 @@ async function readJsonBody(req: http.IncomingMessage): Promise<Record<string, a
       }
       try {
         resolve(JSON.parse(data))
-      } catch (err) {
-        reject(err)
+      } catch {
+        const parseError = new Error('Invalid JSON payload') as Error & { code?: string }
+        parseError.code = 'INVALID_JSON'
+        reject(parseError)
       }
     })
   })
@@ -1264,21 +1817,38 @@ function remainingPercent(window?: RateLimitWindow): number | null {
 }
 
 function recommendAlias(accounts: AccountCredentials[]): string | null {
-  let best: { alias: string; score: number } | null = null
-  const now = Date.now()
+  let best: {
+    alias: string
+    weeklyPercent: number
+    weeklyRemaining: number
+    fivePercent: number
+  } | null = null
+
   for (const account of accounts) {
-    const fiveRaw = remainingPercent(account.rateLimits?.fiveHour)
-    const weeklyRaw = remainingPercent(account.rateLimits?.weekly)
-    if (fiveRaw === null && weeklyRaw === null) {
+    if (account.enabled === false) {
       continue
     }
-    const five = fiveRaw ?? 0
-    const weekly = weeklyRaw ?? 0
-    const expiresInDays = account.expiresAt ? (account.expiresAt - now) / (24 * 3600 * 1000) : 30
-    const expiryPenalty = expiresInDays < 3 ? 20 : expiresInDays < 7 ? 10 : 0
-    const score = five * 2 + weekly - expiryPenalty
-    if (!best || score > best.score) {
-      best = { alias: account.alias, score }
+    const weeklyPercent = remainingPercent(account.rateLimits?.weekly) ?? -1
+    const weeklyRemaining = typeof account.rateLimits?.weekly?.remaining === 'number'
+      ? account.rateLimits.weekly.remaining
+      : -1
+    const fivePercent = remainingPercent(account.rateLimits?.fiveHour) ?? -1
+
+    if (weeklyPercent < 0 && weeklyRemaining < 0 && fivePercent < 0) {
+      continue
+    }
+
+    if (
+      !best ||
+      weeklyPercent > best.weeklyPercent ||
+      (weeklyPercent === best.weeklyPercent && weeklyRemaining > best.weeklyRemaining) ||
+      (
+        weeklyPercent === best.weeklyPercent &&
+        weeklyRemaining === best.weeklyRemaining &&
+        fivePercent > best.fivePercent
+      )
+    ) {
+      best = { alias: account.alias, weeklyPercent, weeklyRemaining, fivePercent }
     }
   }
   return best?.alias ?? null
@@ -1743,12 +2313,19 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
   const host = options?.host || DEFAULT_HOST
   const port = options?.port || DEFAULT_PORT
 
+  if (!isLocalhostHost(host)) {
+    const err = Errors.localhostOnly(host)
+    throw new Error(`${err.code}: ${err.message}`)
+  }
+
   runSync()
   startAuthWatcher()
 
   const server = http.createServer(async (req, res) => {
     const requestUrl = new URL(req.url || '/', `http://${host}:${port}`)
     const path = requestUrl.pathname
+
+    try {
 
     if (req.method === 'GET' && path === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
@@ -1762,7 +2339,13 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
       const rawAccounts = Object.values(store.accounts)
       const accounts = rawAccounts.map(scrubAccount)
       const storeStatus = getStoreStatus()
-      const antigravity = loadAntigravityAccounts()
+      // Phase G: Only load antigravity if feature is enabled
+      const settings = getSettings()
+      const runtimeSettings = getRuntimeSettings()
+      const antigravityEnabled = settings.settings.featureFlags?.antigravityEnabled ?? false
+      const antigravity = antigravityEnabled ? loadAntigravityAccounts() : { accounts: [], path: ANTIGRAVITY_ACCOUNTS_FILE }
+      const forceState = getForceState()
+      const forceActive = isForceActive()
       sendJson(res, 200, {
         authPath: getCodexAuthPath(),
         currentAlias: store.activeAlias,
@@ -1772,10 +2355,22 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
         storeStatus,
         login: pendingLogin,
         lastLoginError,
-        antigravity: { ...antigravity, quota: antigravityQuotaState },
+        // Phase G: Only include antigravity data if feature is enabled
+        antigravity: antigravityEnabled ? { ...antigravity, quota: antigravityQuotaState } : { accounts: [], path: ANTIGRAVITY_ACCOUNTS_FILE, quota: { status: 'disabled', scope: 'active' } },
         queue: getRefreshQueueState(),
         recommendedAlias: recommendAlias(rawAccounts),
-        logPath: getLogPath()
+        logPath: getLogPath(),
+        rotationStrategy: runtimeSettings.settings.rotationStrategy,
+        force: {
+          active: forceActive,
+          alias: forceState.forcedAlias,
+          forcedUntil: forceState.forcedUntil,
+          forcedBy: forceState.forcedBy,
+          remainingMs: getRemainingForceTimeMs(),
+          remainingTime: formatForceDuration(getRemainingForceTimeMs())
+        },
+        // Phase G: Include feature flags in state
+        featureFlags: settings.settings.featureFlags || { antigravityEnabled: false }
       })
       return
     }
@@ -1936,20 +2531,427 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
       return
     }
 
+    // Phase G: Antigravity endpoints - check feature flag
     if (req.method === 'POST' && path === '/api/antigravity/refresh') {
+      // Check if antigravity feature is enabled
+      if (!isFeatureEnabled('antigravityEnabled')) {
+        sendJson(res, 403, { 
+          error: 'Antigravity feature is disabled', 
+          code: 'FEATURE_DISABLED',
+          feature: 'antigravity'
+        })
+        return
+      }
       await refreshAntigravityQuota()
       sendJson(res, 200, { ok: true, quota: antigravityQuotaState })
       return
     }
 
     if (req.method === 'POST' && path === '/api/antigravity/refresh-all') {
+      // Check if antigravity feature is enabled
+      if (!isFeatureEnabled('antigravityEnabled')) {
+        sendJson(res, 403, { 
+          error: 'Antigravity feature is disabled', 
+          code: 'FEATURE_DISABLED',
+          feature: 'antigravity'
+        })
+        return
+      }
       await refreshAntigravityQuotaAll()
       sendJson(res, 200, { ok: true, quota: antigravityQuotaState })
       return
     }
 
-    res.writeHead(404, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ error: 'Not found' }))
+    // Phase D: Account Lifecycle API Endpoints
+    
+    // GET /api/accounts - List all accounts with metadata
+    if (req.method === 'GET' && path === '/api/accounts') {
+      const store = loadStore()
+      const accounts = Object.values(store.accounts).map(acc => ({
+        alias: acc.alias,
+        email: acc.email,
+        enabled: acc.enabled !== false, // Defaults to true
+        disabledAt: acc.disabledAt,
+        disabledBy: acc.disabledBy,
+        disableReason: acc.disableReason,
+        usageCount: acc.usageCount,
+        rateLimits: acc.rateLimits,
+        limitsConfidence: acc.limitsConfidence,
+        limitStatus: acc.limitStatus,
+        limitError: acc.limitError,
+        lastLimitProbeAt: acc.lastLimitProbeAt,
+        lastLimitErrorAt: acc.lastLimitErrorAt,
+        tags: acc.tags,
+        notes: acc.notes
+      }))
+      sendJson(res, 200, { accounts })
+      return
+    }
+
+    // PUT /api/accounts/:alias/enabled - Enable/disable an account
+    if (req.method === 'PUT' && path.startsWith('/api/accounts/') && path.endsWith('/enabled')) {
+      const aliasMatch = path.match(/^\/api\/accounts\/([^\/]+)\/enabled$/)
+      if (!aliasMatch) {
+        sendJson(res, 400, { error: 'Invalid path format' })
+        return
+      }
+      const alias = aliasMatch[1]
+      const store = loadStore()
+      
+      if (!store.accounts[alias]) {
+        sendJson(res, 404, { error: 'Unknown alias', code: 'ACCOUNT_NOT_FOUND' })
+        return
+      }
+      
+      const body = await readJsonBody(req)
+      const enabled = body.enabled === true
+      
+      // Phase D: Prevent disabling the last enabled account
+      if (!enabled) {
+        const enabledCount = Object.values(store.accounts).filter(
+          acc => acc.alias !== alias && acc.enabled !== false
+        ).length
+        if (enabledCount === 0) {
+          sendJson(res, 409, { 
+            error: 'Cannot disable the last enabled account', 
+            code: 'LAST_ACCOUNT' 
+          })
+          return
+        }
+      }
+      
+      // Phase D: Double-submit protection - check if already in desired state
+      const currentEnabled = store.accounts[alias].enabled !== false
+      if (currentEnabled === enabled) {
+        sendJson(res, 409, { 
+          error: enabled ? 'Account is already enabled' : 'Account is already disabled',
+          code: 'ALREADY_IN_STATE'
+        })
+        return
+      }
+      
+      const updates: Partial<AccountCredentials> = { enabled }
+      if (!enabled) {
+        updates.disabledAt = Date.now()
+        updates.disabledBy = 'dashboard' // Could be expanded to track actor
+      } else {
+        // Clear disable metadata when enabling
+        updates.disabledAt = undefined
+        updates.disabledBy = undefined
+        updates.disableReason = undefined
+      }
+      
+      updateAccount(alias, updates)
+      logInfo(`Account ${alias} ${enabled ? 'enabled' : 'disabled'} via dashboard`)
+      sendJson(res, 200, { 
+        ok: true, 
+        alias,
+        enabled,
+        disabledAt: updates.disabledAt,
+        disabledBy: updates.disabledBy
+      })
+      return
+    }
+
+    // POST /api/accounts/:alias/reauth - Re-authenticate an account
+    if (req.method === 'POST' && path.startsWith('/api/accounts/') && path.endsWith('/reauth')) {
+      const aliasMatch = path.match(/^\/api\/accounts\/([^\/]+)\/reauth$/)
+      if (!aliasMatch) {
+        sendJson(res, 400, { error: 'Invalid path format' })
+        return
+      }
+      const alias = aliasMatch[1]
+      const store = loadStore()
+      
+      if (!store.accounts[alias]) {
+        sendJson(res, 404, { error: 'Unknown alias', code: 'ACCOUNT_NOT_FOUND' })
+        return
+      }
+      
+      // Phase D: Cannot re-auth a disabled account
+      if (store.accounts[alias].enabled === false) {
+        sendJson(res, 409, { 
+          error: 'Cannot re-authenticate a disabled account',
+          code: 'ACCOUNT_DISABLED'
+        })
+        return
+      }
+      
+      // Phase D: Only targeted alias credentials mutate
+      // Start OAuth flow for the specific alias
+      try {
+        const flow = await createAuthorizationFlow()
+        const body = await readJsonBody(req)
+        const actor = body.actor || 'dashboard'
+        
+        loginAccount(alias, flow)
+          .then(() => {
+            logInfo(`Re-auth completed for ${alias} by ${actor}`)
+            // Update account metadata
+            updateAccount(alias, {
+              lastRefresh: new Date().toISOString()
+            })
+          })
+          .catch((err) => {
+            logError(`Re-auth failed for ${alias}: ${err}`)
+          })
+        
+        sendJson(res, 200, { 
+          ok: true, 
+          alias,
+          url: flow.url,
+          message: 'OAuth flow started. Complete authentication in the browser.'
+        })
+      } catch (err) {
+        sendJson(res, 500, { error: String(err), code: 'AUTH_FLOW_ERROR' })
+      }
+      return
+    }
+
+    // Phase E: Force Mode API endpoints
+    // GET /api/force - Get current force state
+    if (req.method === 'GET' && path === '/api/force') {
+      const forceState = getForceState()
+      const active = isForceActive()
+      const remainingMs = getRemainingForceTimeMs()
+      
+      sendJson(res, 200, {
+        active,
+        alias: forceState.forcedAlias,
+        forcedAt: forceState.forcedAlias && forceState.forcedUntil 
+          ? forceState.forcedUntil - (24 * 60 * 60 * 1000) 
+          : null,
+        forcedUntil: forceState.forcedUntil,
+        forcedBy: forceState.forcedBy,
+        remainingMs,
+        remainingTime: formatForceDuration(remainingMs),
+        previousRotationStrategy: forceState.previousRotationStrategy
+      })
+      return
+    }
+
+    // POST /api/force - Activate force mode for an alias
+    if (req.method === 'POST' && path === '/api/force') {
+      const body = await readJsonBody(req)
+      const alias = typeof body.alias === 'string' ? body.alias.trim() : ''
+      const actor = typeof body.actor === 'string' ? body.actor.trim() : 'api'
+      
+      if (!alias) {
+        sendJson(res, 400, { error: 'Missing alias', code: 'MISSING_ALIAS' })
+        return
+      }
+      
+      const result = activateForce(alias, actor)
+      
+      if (!result.success) {
+        const statusCode = result.error?.includes('not found') ? 404 
+          : result.error?.includes('disabled') ? 409 
+          : 400
+        sendJson(res, statusCode, { error: result.error, code: 'FORCE_FAILED' })
+        return
+      }
+      
+      logInfo(`Force mode activated for ${alias} by ${actor}`)
+      sendJson(res, 200, {
+        ok: true,
+        alias,
+        forcedUntil: result.state?.forcedUntil,
+        remainingMs: result.state?.forcedUntil ? result.state.forcedUntil - Date.now() : 0,
+        remainingTime: result.state?.forcedUntil 
+          ? formatForceDuration(result.state.forcedUntil - Date.now()) 
+          : '0m',
+        previousRotationStrategy: result.state?.previousRotationStrategy
+      })
+      return
+    }
+
+    // POST /api/force/clear - Deactivate force mode
+    if (req.method === 'POST' && path === '/api/force/clear') {
+      const result = clearForce()
+      
+      if (result.success) {
+        logInfo('Force mode cleared')
+        sendJson(res, 200, {
+          ok: true,
+          restoredStrategy: result.restoredStrategy
+        })
+      } else {
+        sendJson(res, 500, { error: 'Failed to clear force mode', code: 'CLEAR_FAILED' })
+      }
+      return
+    }
+
+    // Phase F: Settings API Endpoints
+    
+    // GET /api/settings - Get current settings
+    if (req.method === 'GET' && path === '/api/settings') {
+      const { getSettingsWithInfo } = await import('./settings.js')
+      const info = getSettingsWithInfo()
+      sendJson(res, 200, {
+        settings: info.settings,
+        source: info.source,
+        preset: info.preset,
+        canReset: info.canReset
+      })
+      return
+    }
+    
+    // PUT /api/settings - Update settings
+    if (req.method === 'PUT' && path === '/api/settings') {
+      const body = await readJsonBody(req)
+      const { updateSettings } = await import('./settings.js')
+      
+      const actor = body.actor || 'dashboard'
+      const updates: Partial<RotationSettings> = {}
+      
+      if (body.rotationStrategy) {
+        updates.rotationStrategy = body.rotationStrategy
+      }
+      if (typeof body.criticalThreshold === 'number') {
+        updates.criticalThreshold = body.criticalThreshold
+      }
+      if (typeof body.lowThreshold === 'number') {
+        updates.lowThreshold = body.lowThreshold
+      }
+      if (body.accountWeights) {
+        updates.accountWeights = body.accountWeights
+      }
+      
+      // Phase G: Handle feature flags
+      if (body.featureFlags && typeof body.featureFlags === 'object') {
+        updates.featureFlags = body.featureFlags
+      }
+      
+      const result = updateSettings(updates, actor)
+      
+      if (result.success) {
+        sendJson(res, 200, {
+          ok: true,
+          settings: result.settings
+        })
+      } else {
+        sendJson(res, 400, {
+          error: 'Validation failed',
+          code: 'VALIDATION_ERROR',
+          details: result.errors
+        })
+      }
+      return
+    }
+    
+    // Phase G: GET /api/settings/feature-flags - Get feature flags
+    if (req.method === 'GET' && path === '/api/settings/feature-flags') {
+      const settings = getSettings()
+      sendJson(res, 200, {
+        featureFlags: settings.settings.featureFlags || { antigravityEnabled: false }
+      })
+      return
+    }
+    
+    // Phase G: PUT /api/settings/feature-flags - Update feature flags
+    if (req.method === 'PUT' && path === '/api/settings/feature-flags') {
+      const body = await readJsonBody(req)
+      const { updateSettings } = await import('./settings.js')
+      
+      const actor = body.actor || 'dashboard'
+      const updates: Partial<RotationSettings> = {}
+      
+      if (body.featureFlags && typeof body.featureFlags === 'object') {
+        updates.featureFlags = body.featureFlags
+        
+        const result = updateSettings(updates, actor)
+        
+        if (result.success && result.settings) {
+          logInfo(`Feature flags updated by ${actor}: ${JSON.stringify(body.featureFlags)}`)
+          sendJson(res, 200, {
+            ok: true,
+            featureFlags: result.settings.featureFlags || { antigravityEnabled: false }
+          })
+        } else {
+          sendJson(res, 400, {
+            error: 'Validation failed',
+            code: 'VALIDATION_ERROR',
+            details: result.errors
+          })
+        }
+      } else {
+        sendJson(res, 400, {
+          error: 'Invalid feature flags',
+          code: 'INVALID_FEATURE_FLAGS'
+        })
+      }
+      return
+    }
+    
+    // POST /api/settings/reset - Reset to defaults
+    if (req.method === 'POST' && path === '/api/settings/reset') {
+      const { resetSettings } = await import('./settings.js')
+      const body = await readJsonBody(req)
+      const actor = body.actor || 'dashboard'
+      
+      const settings = resetSettings(actor)
+      sendJson(res, 200, {
+        ok: true,
+        settings
+      })
+      return
+    }
+    
+    // POST /api/settings/preset - Apply a preset
+    if (req.method === 'POST' && path === '/api/settings/preset') {
+      const body = await readJsonBody(req)
+      const { applyPreset } = await import('./settings.js')
+      
+      const preset = body.preset
+      if (!preset || !['balanced', 'conservative', 'aggressive', 'custom'].includes(preset)) {
+        sendJson(res, 400, {
+          error: 'Invalid preset',
+          code: 'INVALID_PRESET',
+          validPresets: ['balanced', 'conservative', 'aggressive', 'custom']
+        })
+        return
+      }
+      
+      const actor = body.actor || 'dashboard'
+      const result = applyPreset(preset as WeightPreset, actor)
+      
+      if (result.success) {
+        sendJson(res, 200, {
+          ok: true,
+          preset,
+          settings: result.settings
+        })
+      } else {
+        sendJson(res, 400, {
+          error: 'Failed to apply preset',
+          code: 'PRESET_ERROR',
+          details: result.errors
+        })
+      }
+      return
+    }
+
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Not found' }))
+    } catch (err) {
+      if (res.writableEnded) {
+        return
+      }
+
+      const errorCode = (err as { code?: string })?.code
+      if (errorCode === 'INVALID_JSON') {
+        sendJson(res, 400, { error: 'Invalid JSON payload', code: 'INVALID_JSON' })
+        return
+      }
+      if (errorCode === 'PAYLOAD_TOO_LARGE') {
+        sendJson(res, 413, { error: 'Payload too large', code: 'PAYLOAD_TOO_LARGE' })
+        return
+      }
+
+      const errorMessage = err instanceof Error ? err.message : String(err)
+      logError(`Web request failed (${req.method} ${path}): ${errorMessage}`)
+      sendJson(res, 500, { error: 'Internal server error', code: 'INTERNAL_ERROR' })
+    }
   })
 
   server.listen(port, host, () => {

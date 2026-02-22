@@ -3,3 +3,6 @@ node_modules/
 *.log
 .npmrc
 node
+.env
+.env.*
+!.env.example

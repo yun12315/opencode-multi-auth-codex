@@ -2,9 +2,14 @@ import type { AccountCredentials, DEFAULT_CONFIG } from './types.js';
 export interface RotationResult {
     account: AccountCredentials;
     token: string;
+    forceState?: {
+        active: boolean;
+        alias: string | null;
+        remainingMs: number;
+    };
 }
 export declare function getNextAccount(config: typeof DEFAULT_CONFIG): Promise<RotationResult | null>;
-export declare function markRateLimited(alias: string, cooldownMs: number): void;
+export declare function markRateLimited(alias: string, rateLimitedUntil: number): void;
 export declare function clearRateLimit(alias: string): void;
 export declare function markModelUnsupported(alias: string, cooldownMs: number, info?: {
     model?: string;

@@ -1,20 +1,66 @@
 # opencode-multi-auth-codex
 
-Multi-account OAuth rotation for OpenAI Codex. Auto-rotates between your ChatGPT Plus/Pro accounts.
+Multi-account OAuth rotation plugin for OpenCode with a local dashboard, force mode, weighted settings, limits probing, and reliability hardening.
 
-> **Based on [opencode-openai-codex-auth](https://github.com/numman-ali/opencode-openai-codex-auth) by [@nummanali](https://x.com/nummanali)**. Forked and modified to add multi-account rotation support.
+## What this project does
 
-## Patched Build (Codex Backend Compatible)
+- Rotates requests across multiple ChatGPT/Codex OAuth accounts.
+- Keeps a local account store with migration, validation, and atomic writes.
+- Provides a localhost dashboard to manage accounts and limits.
+- Supports force mode (pin one alias), account enable/disable, and re-auth.
+- Supports settings-driven rotation strategy (`round-robin`, `least-used`, `random`, `weighted-round-robin`).
+- Probes limits safely and keeps authoritative data quality rules.
+- Gates non-core Antigravity features behind a feature flag.
 
-This fork patches the plugin to talk to **ChatGPT Codex backend** (`chatgpt.com/backend-api`) with the same headers and request shape as the official Codex OAuth plugin.
+## Current implementation status
 
-**Install from GitHub (recommended for this fork):**
+- Core phases A-G are implemented in this workspace.
+- Validation scripts are available for: unit, integration, web-headless, failure, stress, sandbox, soak.
+- Web hardening fixes are in place:
+  - localhost-only bind enforcement
+  - malformed JSON returns deterministic `400` without process crash
+  - dashboard client script parse issue fixed
 
-```bash
-bun add github:guard22/opencode-multi-auth-codex --cwd ~/.config/opencode
-```
+## Behavior guarantees (latest)
 
-Then set the plugin entry in `~/.config/opencode/opencode.json`:
+- Rate-limit handling sleeps an alias until reset when reset timing is known (`Retry-After`, rate-limit window reset, or parsed provider reset text), instead of retrying that alias immediately.
+- Force mode is strict: when enabled, requests stay pinned to the forced alias and do not silently fall back to other aliases.
+- Rotation strategy control is shown next to Force Mode in the dashboard.
+- Strategy changes from dashboard settings are applied to runtime selection logic (not just persisted state/UI display).
+- Force Mode and strategy interaction is explicit:
+  - while Force Mode is ON, strategy changes are saved
+  - saved strategy becomes active when Force Mode is turned OFF
+- Dashboard controls include mouseover help text for Force Mode and rotation strategy definitions.
+- Account enable/disable toggle is authoritative for eligibility in rotation.
+
+## Repository structure
+
+- `src/` -> TypeScript source
+- `dist/` -> compiled output (`tsc` generated)
+- `tests/unit/` -> unit tests
+- `tests/integration/` -> integration tests
+- `tests/web-headless/` -> headless UI smoke tests
+- `tests/failure/` -> failure-injection tests
+- `tests/stress/` -> stress/concurrency tests
+- `tests/sandbox/` -> sandbox isolation tests
+- `tests/soak/` -> soak scaffolding
+- `docs/` -> QA and phase documentation
+- `IMPLEMENTATION_PLAN.md` -> full plan and contracts
+- `TEST_EXECUTION_PLAN.md` -> required test order and gates
+- `codextesting.md` -> live testing TODO for Codex CLI sessions
+
+## Requirements
+
+- Node.js 20+
+- npm
+- OpenCode CLI
+- ChatGPT/Codex OAuth accounts
+
+## Install and use
+
+### Plugin install (recommended)
+
+In your OpenCode config (`~/.config/opencode/opencode.json`):
 
 ```json
 {
@@ -22,297 +68,152 @@ Then set the plugin entry in `~/.config/opencode/opencode.json`:
 }
 ```
 
-If you already installed an older build, re-run the GitHub install command above to override it.
-
-## Installation
-
-### Via GitHub (Recommended)
-
-Add to your `~/.config/opencode/opencode.json`:
-
-```json
-{
-  "plugin": ["github:guard22/opencode-multi-auth-codex"]
-}
-```
-
-OpenCode will auto-install on first run.
-
-### Manual Install
-
-If auto-install fails, install manually:
-
-```bash
-bun add github:guard22/opencode-multi-auth-codex --cwd ~/.config/opencode
-```
-
-### From Source
+### From source
 
 ```bash
 git clone https://github.com/guard22/opencode-multi-auth-codex.git
 cd opencode-multi-auth-codex
-bun install
-bun run build
-bun link
+npm ci
+npm run build
 ```
 
-## Add Your Accounts
+### Quick start
 
 ```bash
-# Add each account (opens browser for OAuth)
+# Add accounts
 opencode-multi-auth add personal
-opencode-multi-auth add work  
-opencode-multi-auth add backup
+opencode-multi-auth add work
 
-# Each command opens your browser - log in with a different ChatGPT account each time
-```
-
-## Verify Setup
-
-```bash
+# Check status
 opencode-multi-auth status
+
+# Start dashboard
+opencode-multi-auth web --host 127.0.0.1 --port 3434
 ```
 
-Output:
-```
-[multi-auth] Account Status
+Open `http://127.0.0.1:3434`.
 
-Strategy: round-robin
-Accounts: 3
-Active: personal
+## CLI commands
 
-  personal (active)
-    Email: you@personal.com
-    Uses: 12
-    Token expires: 12/25/2025, 3:00:00 PM
+- `opencode-multi-auth add <alias>` -> add account via OAuth
+- `opencode-multi-auth remove <alias>` -> remove account
+- `opencode-multi-auth list` -> list configured accounts
+- `opencode-multi-auth status` -> full status
+- `opencode-multi-auth path` -> print store path
+- `opencode-multi-auth web --host 127.0.0.1 --port 3434` -> run dashboard
+- `opencode-multi-auth service install|disable|status` -> systemd user service helpers
 
-  work
-    Email: you@work.com
-    Uses: 10
-    Token expires: 12/25/2025, 3:00:00 PM
+## Dashboard/API endpoints
 
-  backup
-    Email: you@backup.com
-    Uses: 8
-    Token expires: 12/25/2025, 3:00:00 PM
-```
+- `GET /api/state`
+- `GET /api/logs`
+- `POST /api/sync`
+- `POST /api/auth/start`
+- `POST /api/switch`
+- `POST /api/remove`
+- `POST /api/account/meta`
+- `POST /api/token/refresh`
+- `POST /api/limits/refresh`
+- `POST /api/limits/stop`
+- `GET /api/accounts`
+- `PUT /api/accounts/:alias/enabled`
+- `POST /api/accounts/:alias/reauth`
+- `GET /api/force`
+- `POST /api/force`
+- `POST /api/force/clear`
+- `GET /api/settings`
+- `PUT /api/settings`
+- `GET /api/settings/feature-flags`
+- `PUT /api/settings/feature-flags`
+- `POST /api/settings/reset`
+- `POST /api/settings/preset`
+- `POST /api/antigravity/refresh` (feature-flag gated)
+- `POST /api/antigravity/refresh-all` (feature-flag gated)
 
-## Web Dashboard (Local Only)
+## Environment variables
 
-Launch the local dashboard:
+### Storage and auth
 
-```bash
-opencode-multi-auth web --port 3434 --host 127.0.0.1
-```
+- `OPENCODE_MULTI_AUTH_STORE_DIR` -> override store directory
+- `OPENCODE_MULTI_AUTH_STORE_FILE` -> override store file path
+- `OPENCODE_MULTI_AUTH_CODEX_AUTH_FILE` -> override Codex `auth.json`
+- `CODEX_SOFT_STORE_PASSPHRASE` -> encrypt account store at rest
+- `CODEX_SOFT_LOG_PATH` -> override dashboard log path
 
-Or from the repo:
+### Rotation and limits
 
-```bash
-npm run web
-```
+- `OPENCODE_MULTI_AUTH_ROTATION_STRATEGY` (settings source override; runtime rotation follows persisted dashboard settings)
+- `OPENCODE_MULTI_AUTH_CRITICAL_THRESHOLD`
+- `OPENCODE_MULTI_AUTH_LOW_THRESHOLD`
+- `OPENCODE_MULTI_AUTH_TOKEN_FAILURE_COOLDOWN_MS`
+- `OPENCODE_MULTI_AUTH_PROBE_EFFORT`
+- `OPENCODE_MULTI_AUTH_LIMITS_PROBE_MODELS`
 
-Open `http://127.0.0.1:3434` to manage Codex CLI tokens from `~/.codex/auth.json`:
-- Sync current auth.json token into your local list
-- See which token is active on the device
-- Switch auth.json to a stored token
-- Refresh OAuth tokens (per-token or all)
-- Refresh 5-hour and weekly limits manually (probe-run per alias)
-- Search/filter by alias/email/tags/notes
-- Sort by remaining limits, expiry, or alias; recommended token badge
-- Tag and annotate tokens (notes)
-- Queue-based refresh with progress + stop
-- Limit history sparklines and trend rate
-- Built-in log view
+### Model mapping and runtime behavior
 
-The dashboard watches `~/.codex/auth.json` and will add new tokens as you log in via Codex CLI.
+- `OPENCODE_MULTI_AUTH_PREFER_CODEX_LATEST`
+- `OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL`
+- `OPENCODE_MULTI_AUTH_INJECT_MODELS`
+- `OPENCODE_MULTI_AUTH_TRUNCATION`
+- `OPENCODE_MULTI_AUTH_DEBUG`
 
-Limit refresh runs `codex exec` in a per-alias sandbox (`~/.codex-multi/<alias>`) so you can
-update limits for any stored token without switching the active device token.
+### Feature flags
 
-### Optional Store Encryption
+- `OPENCODE_MULTI_AUTH_ANTIGRAVITY_ENABLED`
 
-Set `CODEX_SOFT_STORE_PASSPHRASE` to encrypt `~/.config/opencode-multi-auth/accounts.json` at rest:
+### Notifications
 
-```bash
-export CODEX_SOFT_STORE_PASSPHRASE="your-passphrase"
-```
-
-If the store is encrypted and the passphrase is missing, the UI will show a locked status and refuse to overwrite.
-
-### Systemd Autostart (user service)
-
-Install and enable the user service:
-
-```bash
-opencode-multi-auth service install --port 3434 --host 127.0.0.1
-```
-
-Check status or disable:
-
-```bash
-opencode-multi-auth service status
-opencode-multi-auth service disable
-```
-
-### Logs
-
-The dashboard writes logs to `~/.config/opencode-multi-auth/logs/codex-soft.log` by default.
-Override with `CODEX_SOFT_LOG_PATH` if you want a custom path.
-
-## Configure OpenCode
-
-Add to your `~/.config/opencode/opencode.json`:
-
-```json
-{
-  "plugin": ["github:guard22/opencode-multi-auth-codex"]
-}
-```
-
-Or with other plugins:
-
-```json
-{
-  "plugin": [
-    "oh-my-opencode",
-    "github:guard22/opencode-multi-auth-codex"
-  ]
-}
-```
-
-
-## Background Notifications (macOS)
-
-
-### iPhone notifications via ntfy (click to open session)
-
-If you want push notifications on iOS (with a clickable link to the OpenCode web session), use `ntfy`.
-
-1) Install the **ntfy** app on iPhone and subscribe to a topic.
-
-2) Set these env vars on the Mac where OpenCode runs:
-
+- `OPENCODE_MULTI_AUTH_NOTIFY`
+- `OPENCODE_MULTI_AUTH_NOTIFY_SOUND`
+- `OPENCODE_MULTI_AUTH_NOTIFY_MAC_OPEN`
 - `OPENCODE_MULTI_AUTH_NOTIFY_NTFY_URL`
-  Example: `https://ntfy.sh/<your-topic>` (or your self-hosted ntfy URL)
+- `OPENCODE_MULTI_AUTH_NOTIFY_NTFY_TOKEN`
 - `OPENCODE_MULTI_AUTH_NOTIFY_UI_BASE_URL`
-  Base URL of your OpenCode web UI reachable from iPhone.
-  Example (Tailscale): `http://100.x.y.z:4096`
-- Optional: `OPENCODE_MULTI_AUTH_NOTIFY_NTFY_TOKEN` (Bearer token)
 
-The plugin sends notifications for:
+## Security rules
 
-- `session.idle` (finished): priority `3`
-- `session.status` with `retry`: priority `4`
-- `session.error`: priority `5`
+- Dashboard host is loopback-only (`127.0.0.1`, `::1`, `localhost`).
+- Non-loopback host bind is rejected.
+- Sensitive token patterns are redacted in logs.
+- Store file permissions are restricted (`0o600`).
+- Antigravity APIs are blocked when feature flag is off.
 
-When possible, the notification body includes `Project` + session `Title`, plus the `sessionID`.
-It also attaches a `Click:` URL like `<base>/session/<sessionID>` so tapping the push opens the session.
+## Build and test
 
-This plugin can send a **macOS notification + sound** when a session finishes work.
-It listens for OpenCode events (`session.status` and `session.idle`).
+```bash
+npm ci
+npm run lint
+npm run build
+npx tsc --noEmit
 
-Defaults:
-- Enabled by default
-- Sound: `/System/Library/Sounds/Glass.aiff`
+npm run test:unit
+npm run test:integration
+npm run test:web:headless
+npm run test:failure
+npm run test:stress
+npm run test:sandbox
+npm run test:soak:48h
+```
 
-Environment variables:
-- `OPENCODE_MULTI_AUTH_NOTIFY=0` disables notifications
-- `OPENCODE_MULTI_AUTH_NOTIFY_SOUND=/path/to/sound.aiff` overrides the sound
-- `OPENCODE_MULTI_AUTH_NOTIFY_MAC_OPEN=0` disables click-to-open on macOS (when available)
+Current test script surfaces are scaffolded and active. For true long soak, set a long duration and keep the run alive.
 
-Clickable macOS notifications require `terminal-notifier` (optional). If installed, clicking the banner opens the session URL.
+## Live validation runbook
 
-If OpenCode seems to only make progress when the window is focused, macOS may be throttling it.
-Try disabling App Nap for OpenCode.app (Finder -> Get Info -> Prevent App Nap),
-or run the server from a terminal under `caffeinate`.
-
-## Codex Latest Model Mapping
-
-OpenCode may not list the newest Codex model yet (it keeps an internal allowlist).
-This plugin can still use the newest model by **mapping** the selected Codex model
-to the latest backend model on ChatGPT.
-
-Default behavior:
-- If you select `openai/gpt-5.2-codex` (or `openai/gpt-5-codex`), the plugin will send requests as `gpt-5.3-codex`.
-
-Environment variables:
-- `OPENCODE_MULTI_AUTH_PREFER_CODEX_LATEST=0` disables the mapping (use exact model).
-- `OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL=gpt-5.3-codex` overrides the target model.
-- `OPENCODE_MULTI_AUTH_DEBUG=1` prints mapping logs like: `model map: gpt-5.2-codex -> gpt-5.3-codex`.
+Use `codextesting.md` for the Codex CLI live-testing checklist and copy-paste command flow.
 
 ## Troubleshooting
 
-### BunInstallFailedError (DependencyLoop)
+- If dashboard start fails with localhost error, check `--host` and use loopback only.
+- If a request returns `INVALID_JSON`, verify payload body is valid JSON.
+- If an alias action returns `ACCOUNT_NOT_FOUND`, refresh account list first.
+- If re-auth is blocked with `ACCOUNT_DISABLED`, enable the account before re-auth.
+- If encrypted store appears locked, export `CODEX_SOFT_STORE_PASSPHRASE` before launching.
 
-If OpenCode fails to boot with:
+## Development notes
 
-```
-BunInstallFailedError
-{ "pkg": "github:guard22/opencode-multi-auth-codex", "version": "latest" }
-```
-
-It usually means an older `@a3fckx/opencode-multi-auth` dependency is still present.
-
-Fix:
-
-1) Remove the old dependency from `~/.config/opencode/package.json`:
-
-```json
-{
-  "dependencies": {
-    "@a3fckx/opencode-multi-auth": "^1.0.4"
-  }
-}
-```
-
-2) Reinstall:
-
-```bash
-bun add github:guard22/opencode-multi-auth-codex --cwd ~/.config/opencode
-```
-
-Optional fallback: use a file path plugin entry if installs are blocked:
-
-```json
-{
-  "plugin": [
-    "file:///Users/<you>/.config/opencode/node_modules/@guard22/opencode-multi-auth-codex/dist/index.js"
-  ]
-}
-```
-
-## How It Works
-
-| Feature | Behavior |
-|---------|----------|
-| **Rotation** | Round-robin across all accounts per API call |
-| **Rate Limits** | Auto-skips rate-limited account for 5 min, uses next |
-| **Token Refresh** | Auto-refreshes tokens before expiry |
-| **Models** | Auto-discovers GPT-5.x models from OpenAI API |
-| **Storage** | `~/.config/opencode-multi-auth/accounts.json` |
-
-## CLI Commands
-
-| Command | Description |
-|---------|-------------|
-| `add <alias>` | Add new account via OAuth (opens browser) |
-| `remove <alias>` | Remove an account |
-| `list` | List all configured accounts |
-| `status` | Detailed status with usage counts |
-| `path` | Show config file location |
-| `web` | Launch local Codex auth.json dashboard |
-| `service` | Install/disable systemd user service |
-| `help` | Show help message |
-
-## Requirements
-
-- ChatGPT Plus/Pro subscription(s)
-- OpenCode CLI
-
-## Credits
-
-- Original OAuth implementation: [numman-ali/opencode-openai-codex-auth](https://github.com/numman-ali/opencode-openai-codex-auth)
-- Multi-account rotation: [@a3fckx](https://github.com/a3fckx)
+- Edit `src/*`, never hand-edit `dist/*`.
+- Run `npm run build` after source changes.
+- Keep manual/live tests sandboxed (temp HOME/store/auth paths).
 
 ## License
 

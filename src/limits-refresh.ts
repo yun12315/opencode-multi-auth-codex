@@ -1,7 +1,13 @@
-import { mergeRateLimits } from './rate-limits.js'
+import {
+  getBlockingRateLimitResetAt,
+  isRateLimitErrorText,
+  mergeRateLimits,
+  parseRateLimitResetFromError
+} from './rate-limits.js'
 import { loadStore, updateAccount } from './store.js'
 import { probeRateLimitsForAccount } from './probe-limits.js'
 import { logError, logInfo } from './logger.js'
+import { calculateLimitsConfidence } from './types.js'
 import type { AccountCredentials } from './types.js'
 
 export interface LimitRefreshResult {
@@ -14,26 +20,52 @@ export async function refreshRateLimitsForAccount(account: AccountCredentials): 
   updateAccount(account.alias, { limitStatus: 'running', limitError: undefined })
   logInfo(`Refreshing limits for ${account.alias}`)
   const probe = await probeRateLimitsForAccount(account)
-  if (!probe.rateLimits) {
+  
+  // Phase C: Only accept authoritative limits from successful completed sessions
+  if (!probe.isAuthoritative || !probe.rateLimits) {
     logError(`Limit probe failed for ${account.alias}: ${probe.error || 'Probe failed'}`)
-    updateAccount(account.alias, {
+    const now = Date.now()
+    const errorText = probe.error || 'Probe failed'
+    const likelyRateLimit = isRateLimitErrorText(errorText)
+    const parsedResetAt = parseRateLimitResetFromError(errorText, now)
+    const fallbackResetAt = likelyRateLimit
+      ? getBlockingRateLimitResetAt(account.rateLimits, now)
+      : undefined
+    const rateLimitedUntil = parsedResetAt ?? fallbackResetAt
+    
+    // Phase C: Update only error metadata, preserve prior limits
+    const updates: Partial<AccountCredentials> = {
       limitStatus: 'error',
-      limitError: probe.error || 'Probe failed',
-      lastLimitErrorAt: Date.now()
-    })
+      limitError: errorText,
+      lastLimitErrorAt: now,
+      limitsConfidence: calculateLimitsConfidence(
+        account.lastLimitProbeAt,
+        now,
+        'error'
+      )
+    }
+    if (typeof rateLimitedUntil === 'number' && rateLimitedUntil > now) {
+      updates.rateLimitedUntil = rateLimitedUntil
+    }
+    updateAccount(account.alias, updates)
     return {
       alias: account.alias,
       updated: false,
-      error: probe.error || 'Probe failed'
+      error: errorText
     }
   }
 
+  // Phase C: Only merge authoritative limits from successful probe
+  const now = Date.now()
   updateAccount(account.alias, {
     rateLimits: mergeRateLimits(account.rateLimits, probe.rateLimits),
     limitStatus: 'success',
     limitError: undefined,
-    lastLimitProbeAt: Date.now()
+    lastLimitProbeAt: now,
+    limitsConfidence: calculateLimitsConfidence(now, account.lastLimitErrorAt, 'success')
   })
+  
+  logInfo(`Limits refreshed for ${account.alias} using model ${probe.probeModel || 'unknown'}, effort ${probe.probeEffort || 'default'}`)
   return { alias: account.alias, updated: true }
 }
 
