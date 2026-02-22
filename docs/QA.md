@@ -1,5 +1,8 @@
 # QA Documentation - OpenCode Multi-Auth
 
+> Historical phase log: this document tracks QA progress across phases and includes baseline snapshots.
+> For current behavior and final readiness, use `README.md` and `docs/PHASE_H_VALIDATION.md`.
+
 ## Phase A: Repository Bootstrap + Baseline Capture
 
 **Date:** 2026-02-21

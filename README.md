@@ -2,6 +2,14 @@
 
 Multi-account OAuth rotation plugin for OpenCode with a local dashboard, force mode, weighted settings, limits probing, and reliability hardening.
 
+## Documentation map
+
+- `README.md` -> primary operator and developer documentation for current behavior.
+- `docs/ADMIN_MERGE_BRIEF.md` -> concise upstream/admin review summary.
+- `docs/PHASE_H_VALIDATION.md` -> final validation report (current readiness reference).
+- `codextesting.md` -> live/manual testing runbook.
+- `docs/README.md` -> full docs index with authoritative vs historical references.
+
 ## What this project does
 
 - Rotates requests across multiple ChatGPT/Codex OAuth accounts.
@@ -33,6 +41,14 @@ Multi-account OAuth rotation plugin for OpenCode with a local dashboard, force m
 - Dashboard controls include mouseover help text for Force Mode and rotation strategy definitions.
 - Account enable/disable toggle is authoritative for eligibility in rotation.
 
+## Rotation strategy reference
+
+- `round-robin` -> cycle through healthy enabled accounts in order.
+- `least-used` -> prefer the healthy enabled account with the lowest usage count.
+- `random` -> pick randomly from healthy enabled accounts.
+- `weighted-round-robin` -> split traffic by configured account weights (example: `0.70/0.20/0.10` ≈ `70%/20%/10%`).
+- Force Mode precedence -> when Force Mode is ON, strategy is paused; strategy changes are saved and become active when Force Mode is OFF.
+
 ## Repository structure
 
 - `src/` -> TypeScript source
@@ -44,7 +60,7 @@ Multi-account OAuth rotation plugin for OpenCode with a local dashboard, force m
 - `tests/stress/` -> stress/concurrency tests
 - `tests/sandbox/` -> sandbox isolation tests
 - `tests/soak/` -> soak scaffolding
-- `docs/` -> QA and phase documentation
+- `docs/` -> QA and phase documentation (see `docs/README.md` for canonical/historical split)
 - `IMPLEMENTATION_PLAN.md` -> full plan and contracts
 - `TEST_EXECUTION_PLAN.md` -> required test order and gates
 - `codextesting.md` -> live testing TODO for Codex CLI sessions

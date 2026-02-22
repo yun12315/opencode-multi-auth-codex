@@ -1,5 +1,8 @@
 # Comprehensive Production Readiness Report
 
+> Historical snapshot: this report reflects readiness status during an intermediate phase.
+> Use `README.md` and `docs/PHASE_H_VALIDATION.md` as the current source of truth.
+
 **Date:** 2026-02-22  
 **Project:** OpenCode Multi-Auth Codex  
 **Scope:** Phases A, B, C, D, F (Phase E in progress)
