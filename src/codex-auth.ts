@@ -17,8 +17,17 @@ export interface CodexAuthFile {
   last_refresh?: string
 }
 
+const CODEX_AUTH_FILE_ENV = 'OPENCODE_MULTI_AUTH_CODEX_AUTH_FILE'
+
+function getCodexAuthFilePath(): string {
+  const override = process.env[CODEX_AUTH_FILE_ENV]
+  if (override && override.trim()) return path.resolve(override.trim())
+  const CODEX_DIR = path.join(os.homedir(), '.codex')
+  return path.join(CODEX_DIR, 'auth.json')
+}
+
 const CODEX_DIR = path.join(os.homedir(), '.codex')
-const CODEX_AUTH_FILE = path.join(CODEX_DIR, 'auth.json')
+const CODEX_AUTH_FILE = getCodexAuthFilePath()
 
 let lastFingerprint: string | null = null
 let lastAuthError: string | null = null

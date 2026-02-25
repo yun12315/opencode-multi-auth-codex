@@ -2,7 +2,13 @@ import type { Plugin, PluginInput } from '@opencode-ai/plugin'
 import fs from 'node:fs'
 import { syncAuthFromOpenCode } from './auth-sync.js'
 import { createAuthorizationFlow, loginAccount } from './auth.js'
-import { extractRateLimitUpdate, mergeRateLimits } from './rate-limits.js'
+import {
+  extractRateLimitUpdate,
+  getBlockingRateLimitResetAt,
+  mergeRateLimits,
+  parseRateLimitResetFromError,
+  parseRetryAfterHeader
+} from './rate-limits.js'
 import {
   getNextAccount,
   markAuthInvalid,
@@ -10,8 +16,11 @@ import {
   markRateLimited,
   markWorkspaceDeactivated
 } from './rotation.js'
-import { listAccounts, updateAccount } from './store.js'
-import { DEFAULT_CONFIG, type PluginConfig } from './types.js'
+import { getForceState, isForceActive } from './force-mode.js'
+import { getRuntimeSettings } from './settings.js'
+import { listAccounts, updateAccount, loadStore } from './store.js'
+import { DEFAULT_CONFIG, type AccountRateLimits, type PluginConfig } from './types.js'
+import { Errors, type DeterministicError } from './errors.js'
 
 const PROVIDER_ID = 'openai'
 const CODEX_BASE_URL = 'https://chatgpt.com/backend-api'
@@ -140,6 +149,43 @@ function ensureContentType(headers: Headers): Headers {
     responseHeaders.set('content-type', 'text/event-stream; charset=utf-8')
   }
   return responseHeaders
+}
+
+function extractErrorMessage(payload: any, fallbackText: string = ''): string {
+  if (!payload || typeof payload !== 'object') {
+    return fallbackText
+  }
+
+  const detailMessage = typeof payload?.detail?.message === 'string'
+    ? payload.detail.message
+    : typeof payload?.detail === 'string'
+      ? payload.detail
+      : ''
+
+  const errorMessage = typeof payload?.error?.message === 'string'
+    ? payload.error.message
+    : ''
+
+  const topLevelMessage = typeof payload?.message === 'string'
+    ? payload.message
+    : ''
+
+  return detailMessage || errorMessage || topLevelMessage || fallbackText
+}
+
+function resolveRateLimitedUntil(
+  rateLimits: AccountRateLimits | undefined,
+  headers: Headers,
+  errorText: string,
+  fallbackCooldownMs: number,
+  now: number = Date.now()
+): number {
+  const retryAfterUntil = parseRetryAfterHeader(headers.get('retry-after'), now) || 0
+  const windowResetUntil = getBlockingRateLimitResetAt(rateLimits, now) || 0
+  const messageResetUntil = parseRateLimitResetFromError(errorText, now) || 0
+  const fallbackUntil = now + fallbackCooldownMs
+
+  return Math.max(fallbackUntil, retryAfterUntil, windowResetUntil, messageResetUntil)
 }
 
 function parseSseStream(sseText: string): unknown | null {
@@ -543,249 +589,299 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
           return {}
         }
 
-        // Custom fetch with multi-account rotation
         const customFetch = async (
           input: Request | string | URL,
           init?: RequestInit
         ): Promise<Response> => {
           await syncAuthFromOpenCode(getAuth)
-          const rotation = await getNextAccount(pluginConfig)
+          
+          const store = loadStore()
+          const forceState = getForceState()
+          const forcePinned = isForceActive() && !!forceState.forcedAlias
+          const eligibleCount = Object.values(store.accounts).filter(acc => {
+            const now = Date.now()
+            return (!acc.rateLimitedUntil || acc.rateLimitedUntil < now) &&
+                   (!acc.modelUnsupportedUntil || acc.modelUnsupportedUntil < now) &&
+                   (!acc.workspaceDeactivatedUntil || acc.workspaceDeactivatedUntil < now) &&
+                   !acc.authInvalid &&
+                   acc.enabled !== false
+          }).length
+          
+          const maxAttempts = forcePinned ? 1 : Math.max(1, eligibleCount)
+          const triedAliases = new Set<string>()
+          let attempt = 0
 
-          if (!rotation) {
-            return new Response(
-              JSON.stringify({ error: { message: 'No available accounts' } }),
-              { status: 503, headers: { 'Content-Type': 'application/json' } }
-            )
-          }
-
-          const { account, token } = rotation
-          const decoded = decodeJWT(token)
-          const accountId = decoded?.[JWT_CLAIM_PATH]?.chatgpt_account_id
-          if (!accountId) {
-            return new Response(
-              JSON.stringify({ error: { message: '[multi-auth] Failed to extract accountId from token' } }),
-              { status: 401, headers: { 'Content-Type': 'application/json' } }
-            )
-          }
-
-          const originalUrl = extractRequestUrl(input)
-          const url = toCodexBackendUrl(originalUrl)
-
-          let body: Record<string, any> = {}
-          try {
-            body = init?.body ? JSON.parse(init.body as string) : {}
-          } catch {
-            body = {}
-          }
-
-          const isStreaming = body?.stream === true
-          const normalizedModel = normalizeModel(body.model)
-          const reasoningMatch = body.model?.match(/-(none|low|medium|high|xhigh)$/)
-
-	          const payload: Record<string, any> = {
-	            ...body,
-	            model: normalizedModel,
-	            store: false
-	          }
-
-	          // Note: The ChatGPT Codex backend does not currently accept
-	          // `truncation`. Keep this opt-in and default off.
-	          if (payload.truncation === undefined) {
-	            const truncationRaw = (process.env.OPENCODE_MULTI_AUTH_TRUNCATION || '').trim()
-	            if (truncationRaw && truncationRaw !== 'disabled' && truncationRaw !== 'false' && truncationRaw !== '0') {
-	              payload.truncation = truncationRaw
-	            }
-	          }
-
-          if (payload.input) {
-            payload.input = filterInput(payload.input)
-          }
-
-          if (reasoningMatch?.[1]) {
-            payload.reasoning = {
-              ...(payload.reasoning || {}),
-              effort: reasoningMatch[1],
-              summary: payload.reasoning?.summary || 'auto'
-            }
-          }
-
-          delete payload.reasoning_effort
-
-          try {
-            const headers = new Headers(init?.headers || {})
-            headers.delete('x-api-key')
-            headers.set('Content-Type', 'application/json')
-            headers.set('Authorization', `Bearer ${token}`)
-            headers.set(OPENAI_HEADERS.ACCOUNT_ID, accountId)
-            headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES)
-            headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX)
-
-            const cacheKey = payload?.prompt_cache_key
-            if (cacheKey) {
-              headers.set(OPENAI_HEADERS.CONVERSATION_ID, cacheKey)
-              headers.set(OPENAI_HEADERS.SESSION_ID, cacheKey)
-            } else {
-              headers.delete(OPENAI_HEADERS.CONVERSATION_ID)
-              headers.delete(OPENAI_HEADERS.SESSION_ID)
+          while (attempt < maxAttempts) {
+            attempt++
+            
+            const settings = getRuntimeSettings()
+            const effectiveConfig: PluginConfig = {
+              ...pluginConfig,
+              rotationStrategy: settings.settings.rotationStrategy
             }
 
-            headers.set('accept', 'text/event-stream')
+            const rotation = await getNextAccount(effectiveConfig)
 
-            const res = await fetch(url, {
-              method: init?.method || 'POST',
-              headers,
-              body: JSON.stringify(payload)
-            })
+            if (!rotation) {
+              if (forcePinned && forceState.forcedAlias) {
+                const forced = loadStore().accounts[forceState.forcedAlias]
+                const now = Date.now()
+                if (forced?.rateLimitedUntil && forced.rateLimitedUntil > now) {
+                  return new Response(
+                    JSON.stringify({
+                      error: {
+                        code: 'RATE_LIMITED',
+                        message: `Forced account '${forced.alias}' is rate-limited until ${new Date(forced.rateLimitedUntil).toISOString()}`,
+                        details: { alias: forced.alias, rateLimitedUntil: forced.rateLimitedUntil }
+                      }
+                    }),
+                    { status: 429, headers: { 'Content-Type': 'application/json' } }
+                  )
+                }
+              }
+              return new Response(
+                JSON.stringify({ 
+                  error: Errors.noEligibleAccounts('No available accounts after filtering')
+                }),
+                { status: 503, headers: { 'Content-Type': 'application/json' } }
+              )
+            }
 
-            const limitUpdate = extractRateLimitUpdate(res.headers)
-            if (limitUpdate) {
-              updateAccount(account.alias, {
-                rateLimits: mergeRateLimits(account.rateLimits, limitUpdate)
+            const { account, token } = rotation
+            
+            if (triedAliases.has(account.alias)) {
+              continue
+            }
+            triedAliases.add(account.alias)
+
+            const decoded = decodeJWT(token)
+            const accountId = decoded?.[JWT_CLAIM_PATH]?.chatgpt_account_id
+            if (!accountId) {
+              return new Response(
+                JSON.stringify({ 
+                  error: { 
+                    code: 'TOKEN_PARSE_ERROR',
+                    message: '[multi-auth] Failed to extract accountId from token' 
+                  }
+                }),
+                { status: 401, headers: { 'Content-Type': 'application/json' } }
+              )
+            }
+
+            const originalUrl = extractRequestUrl(input)
+            const url = toCodexBackendUrl(originalUrl)
+
+            let body: Record<string, any> = {}
+            try {
+              body = init?.body ? JSON.parse(init.body as string) : {}
+            } catch {
+              body = {}
+            }
+
+            const isStreaming = body?.stream === true
+            const normalizedModel = normalizeModel(body.model)
+            const reasoningMatch = body.model?.match(/-(none|low|medium|high|xhigh)$/)
+
+            const payload: Record<string, any> = {
+              ...body,
+              model: normalizedModel,
+              store: false
+            }
+
+            if (payload.truncation === undefined) {
+              const truncationRaw = (process.env.OPENCODE_MULTI_AUTH_TRUNCATION || '').trim()
+              if (truncationRaw && truncationRaw !== 'disabled' && truncationRaw !== 'false' && truncationRaw !== '0') {
+                payload.truncation = truncationRaw
+              }
+            }
+
+            if (payload.input) {
+              payload.input = filterInput(payload.input)
+            }
+
+            if (reasoningMatch?.[1]) {
+              payload.reasoning = {
+                ...(payload.reasoning || {}),
+                effort: reasoningMatch[1],
+                summary: payload.reasoning?.summary || 'auto'
+              }
+            }
+
+            delete payload.reasoning_effort
+
+            try {
+              const headers = new Headers(init?.headers || {})
+              headers.delete('x-api-key')
+              headers.set('Content-Type', 'application/json')
+              headers.set('Authorization', `Bearer ${token}`)
+              headers.set(OPENAI_HEADERS.ACCOUNT_ID, accountId)
+              headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES)
+              headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX)
+
+              const cacheKey = payload?.prompt_cache_key
+              if (cacheKey) {
+                headers.set(OPENAI_HEADERS.CONVERSATION_ID, cacheKey)
+                headers.set(OPENAI_HEADERS.SESSION_ID, cacheKey)
+              } else {
+                headers.delete(OPENAI_HEADERS.CONVERSATION_ID)
+                headers.delete(OPENAI_HEADERS.SESSION_ID)
+              }
+
+              headers.set('accept', 'text/event-stream')
+
+              const res = await fetch(url, {
+                method: init?.method || 'POST',
+                headers,
+                body: JSON.stringify(payload)
               })
-            }
 
-            // Handle rate limiting with automatic rotation
-            if (res.status === 401 || res.status === 403) {
-              const errorData = await res.clone().json().catch(() => ({})) as { error?: { message?: string } }
-              const message = errorData?.error?.message || ''
-              if (message.toLowerCase().includes('invalidated') || res.status === 401) {
-                markAuthInvalid(account.alias)
-              }
-
-              const retryRotation = await getNextAccount(pluginConfig)
-              if (retryRotation && retryRotation.account.alias !== account.alias) {
-                return customFetch(input, init)
-              }
-
-              return new Response(
-                JSON.stringify({
-                  error: {
-                    message: `[multi-auth][acc=${account.alias}] Unauthorized on all accounts. ${message}`.trim()
-                  }
-                }),
-                { status: res.status, headers: { 'Content-Type': 'application/json' } }
-              )
-            }
-
-            if (res.status === 429) {
-              markRateLimited(account.alias, pluginConfig.rateLimitCooldownMs)
-
-              // Try another account
-              const retryRotation = await getNextAccount(pluginConfig)
-              if (retryRotation && retryRotation.account.alias !== account.alias) {
-                return customFetch(input, init)
-              }
-
-              // All accounts exhausted
-              const errorData = await res.json().catch(() => ({})) as { error?: { message?: string } }
-              return new Response(
-                JSON.stringify({
-                  error: {
-                    message: `[multi-auth][acc=${account.alias}] Rate limited on all accounts. ${errorData.error?.message || ''}`
-                  }
-                }),
-                { status: 429, headers: { 'Content-Type': 'application/json' } }
-              )
-            }
-
-            if (res.status === 402) {
-              // Some accounts can temporarily be in a deactivated workspace state.
-              // Rotate to the next account instead of hard-failing the request.
-              const errorData = await res.clone().json().catch(() => null) as any
-              const errorText = await res.clone().text().catch(() => '')
-
-              const code =
-                (typeof errorData?.detail?.code === 'string' && errorData.detail.code) ||
-                (typeof errorData?.error?.code === 'string' && errorData.error.code) ||
-                ''
-              const message =
-                (typeof errorData?.detail?.message === 'string' && errorData.detail.message) ||
-                (typeof errorData?.detail === 'string' && errorData.detail) ||
-                (typeof errorData?.error?.message === 'string' && errorData.error.message) ||
-                (typeof errorData?.message === 'string' && errorData.message) ||
-                errorText ||
-                ''
-
-              const isDeactivatedWorkspace =
-                code === 'deactivated_workspace' ||
-                message.toLowerCase().includes('deactivated_workspace') ||
-                message.toLowerCase().includes('deactivated workspace')
-
-              if (isDeactivatedWorkspace) {
-                markWorkspaceDeactivated(account.alias, pluginConfig.workspaceDeactivatedCooldownMs, {
-                  error: message || code
+              const limitUpdate = extractRateLimitUpdate(res.headers)
+              const mergedRateLimits = limitUpdate
+                ? mergeRateLimits(account.rateLimits, limitUpdate)
+                : account.rateLimits
+              if (limitUpdate) {
+                updateAccount(account.alias, {
+                  rateLimits: mergedRateLimits
                 })
+              }
 
-                const retryRotation = await getNextAccount(pluginConfig)
-                if (retryRotation && retryRotation.account.alias !== account.alias) {
-                  return customFetch(input, init)
+              if (res.status === 401 || res.status === 403) {
+                const errorData = await res.clone().json().catch(() => ({})) as { error?: { message?: string } }
+                const message = errorData?.error?.message || ''
+                if (message.toLowerCase().includes('invalidated') || res.status === 401) {
+                  markAuthInvalid(account.alias)
+                }
+
+                if (attempt < maxAttempts) {
+                  continue
                 }
 
                 return new Response(
                   JSON.stringify({
-                    error: {
-                      message: `[multi-auth][acc=${account.alias}] Workspace deactivated on all accounts. ${message || code}`.trim()
-                    }
+                    error: Errors.maxRetriesExceeded(attempt, Array.from(triedAliases))
                   }),
-                  { status: 402, headers: { 'Content-Type': 'application/json' } }
+                  { status: res.status, headers: { 'Content-Type': 'application/json' } }
                 )
               }
-            }
 
-            if (res.status === 400) {
-              // Some accounts get staged access to newer Codex models (e.g. gpt-5.3-codex).
-              // If the backend says the model isn't supported for this account, temporarily
-              // skip it instead of trapping the whole rotation on a permanent 400 loop.
-              const errorData = await res.clone().json().catch(() => ({})) as any
-              const message =
-                (typeof errorData?.detail === 'string' && errorData.detail) ||
-                (typeof errorData?.error?.message === 'string' && errorData.error.message) ||
-                (typeof errorData?.message === 'string' && errorData.message) ||
-                ''
+              if (res.status === 429) {
+                const errorData = await res.clone().json().catch(() => ({})) as any
+                const errorText = extractErrorMessage(errorData)
+                const rateLimitedUntil = resolveRateLimitedUntil(
+                  mergedRateLimits,
+                  res.headers,
+                  errorText,
+                  pluginConfig.rateLimitCooldownMs
+                )
+                markRateLimited(account.alias, rateLimitedUntil)
 
-              const isModelUnsupported =
-                typeof message === 'string' &&
-                message.toLowerCase().includes('model is not supported') &&
-                message.toLowerCase().includes('chatgpt account')
-
-              if (isModelUnsupported) {
-                markModelUnsupported(account.alias, pluginConfig.modelUnsupportedCooldownMs, {
-                  model: normalizedModel,
-                  error: message
-                })
-
-                const retryRotation = await getNextAccount(pluginConfig)
-                if (retryRotation && retryRotation.account.alias !== account.alias) {
-                  return customFetch(input, init)
+                if (attempt < maxAttempts) {
+                  continue
                 }
 
                 return new Response(
                   JSON.stringify({
-                    error: {
-                      message: `[multi-auth] Model not supported on all accounts. ${message}`.trim()
-                    }
+                    error: Errors.maxRetriesExceeded(attempt, Array.from(triedAliases))
                   }),
-                  { status: 400, headers: { 'Content-Type': 'application/json' } }
+                  { status: 429, headers: { 'Content-Type': 'application/json' } }
                 )
               }
-            }
 
-            if (!res.ok) {
+              if (res.status === 402) {
+                const errorData = await res.clone().json().catch(() => null) as any
+                const errorText = await res.clone().text().catch(() => '')
+
+                const code =
+                  (typeof errorData?.detail?.code === 'string' && errorData.detail.code) ||
+                  (typeof errorData?.error?.code === 'string' && errorData.error.code) ||
+                  ''
+                const message =
+                  (typeof errorData?.detail?.message === 'string' && errorData.detail.message) ||
+                  (typeof errorData?.detail === 'string' && errorData.detail) ||
+                  (typeof errorData?.error?.message === 'string' && errorData.error.message) ||
+                  (typeof errorData?.message === 'string' && errorData.message) ||
+                  errorText ||
+                  ''
+
+                const isDeactivatedWorkspace =
+                  code === 'deactivated_workspace' ||
+                  message.toLowerCase().includes('deactivated_workspace') ||
+                  message.toLowerCase().includes('deactivated workspace')
+
+                if (isDeactivatedWorkspace) {
+                  markWorkspaceDeactivated(account.alias, pluginConfig.workspaceDeactivatedCooldownMs, {
+                    error: message || code
+                  })
+
+                  if (attempt < maxAttempts) {
+                    continue
+                  }
+
+                  return new Response(
+                    JSON.stringify({
+                      error: Errors.maxRetriesExceeded(attempt, Array.from(triedAliases))
+                    }),
+                    { status: 402, headers: { 'Content-Type': 'application/json' } }
+                  )
+                }
+              }
+
+              if (res.status === 400) {
+                const errorData = await res.clone().json().catch(() => ({})) as any
+                const message =
+                  (typeof errorData?.detail === 'string' && errorData.detail) ||
+                  (typeof errorData?.error?.message === 'string' && errorData.error.message) ||
+                  (typeof errorData?.message === 'string' && errorData.message) ||
+                  ''
+
+                const isModelUnsupported =
+                  typeof message === 'string' &&
+                  message.toLowerCase().includes('model is not supported') &&
+                  message.toLowerCase().includes('chatgpt account')
+
+                if (isModelUnsupported) {
+                  markModelUnsupported(account.alias, pluginConfig.modelUnsupportedCooldownMs, {
+                    model: normalizedModel,
+                    error: message
+                  })
+
+                  if (attempt < maxAttempts) {
+                    continue
+                  }
+
+                  return new Response(
+                    JSON.stringify({
+                      error: Errors.maxRetriesExceeded(attempt, Array.from(triedAliases))
+                    }),
+                    { status: 400, headers: { 'Content-Type': 'application/json' } }
+                  )
+                }
+              }
+
+              if (!res.ok) {
+                return res
+              }
+
+              const responseHeaders = ensureContentType(res.headers)
+              if (!isStreaming && responseHeaders.get('content-type')?.includes('text/event-stream')) {
+                return await convertSseToJson(res, responseHeaders)
+              }
+
               return res
+            } catch (err) {
+              return new Response(
+                JSON.stringify({ error: { code: 'REQUEST_FAILED', message: `[multi-auth] Request failed: ${err}` } }),
+                { status: 500, headers: { 'Content-Type': 'application/json' } }
+              )
             }
-
-            const responseHeaders = ensureContentType(res.headers)
-            if (!isStreaming && responseHeaders.get('content-type')?.includes('text/event-stream')) {
-              return await convertSseToJson(res, responseHeaders)
-            }
-
-            return res
-          } catch (err) {
-            return new Response(
-              JSON.stringify({ error: { message: `[multi-auth] Request failed: ${err}` } }),
-              { status: 500, headers: { 'Content-Type': 'application/json' } }
-            )
           }
+
+          return new Response(
+            JSON.stringify({ 
+              error: Errors.maxRetriesExceeded(attempt, Array.from(triedAliases))
+            }),
+            { status: 503, headers: { 'Content-Type': 'application/json' } }
+          )
         }
 
         // Return SDK configuration with custom fetch for rotation

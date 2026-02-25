@@ -1,11 +1,21 @@
 import { getStoreDiagnostics, loadStore, saveStore, updateAccount } from './store.js'
 import { ensureValidToken } from './auth.js'
+import { isForceActive, checkAndAutoClearForce, getForceState, clearForce } from './force-mode.js'
+import { getRuntimeSettings, calculateWeightedSelection } from './settings.js'
 import type { AccountCredentials, DEFAULT_CONFIG } from './types.js'
 
 export interface RotationResult {
   account: AccountCredentials
   token: string
+  forceState?: {
+    active: boolean
+    alias: string | null
+    remainingMs: number
+  }
 }
+
+const HEALTH_HYSTERESIS_MS = 10_000
+const RECENT_FAILURE_WINDOW_MS = 60_000
 
 function shuffled<T>(input: T[]): T[] {
   const a = [...input]
@@ -16,9 +26,69 @@ function shuffled<T>(input: T[]): T[] {
   return a
 }
 
+interface AccountHealth {
+  alias: string
+  isHealthy: boolean
+  isInProbation: boolean
+  recentFailures: number
+  priority: number
+}
+
+function evaluateAccountHealth(acc: AccountCredentials, now: number): AccountHealth {
+  const wasRateLimited: boolean = !!(acc.rateLimitedUntil && acc.rateLimitedUntil > now - HEALTH_HYSTERESIS_MS)
+  const wasModelUnsupported: boolean = !!(acc.modelUnsupportedUntil && acc.modelUnsupportedUntil > now - HEALTH_HYSTERESIS_MS)
+  const wasWorkspaceDeactivated: boolean = !!(acc.workspaceDeactivatedUntil && acc.workspaceDeactivatedUntil > now - HEALTH_HYSTERESIS_MS)
+  
+  // Phase D: Check if account is disabled
+  const isDisabled: boolean = acc.enabled === false
+  
+  const currentlyBlocked: boolean = 
+    !!(acc.rateLimitedUntil && acc.rateLimitedUntil > now) ||
+    !!(acc.modelUnsupportedUntil && acc.modelUnsupportedUntil > now) ||
+    !!(acc.workspaceDeactivatedUntil && acc.workspaceDeactivatedUntil > now) ||
+    !!acc.authInvalid ||
+    isDisabled // Phase D: Exclude disabled accounts
+
+  const isInProbation: boolean = !currentlyBlocked && (wasRateLimited || wasModelUnsupported || wasWorkspaceDeactivated)
+  
+  let recentFailures = 0
+  if (acc.lastLimitErrorAt && acc.lastLimitErrorAt > now - RECENT_FAILURE_WINDOW_MS) {
+    recentFailures++
+  }
+  if (acc.authInvalidatedAt && acc.authInvalidatedAt > now - RECENT_FAILURE_WINDOW_MS) {
+    recentFailures++
+  }
+
+  let priority = 100
+  if (isInProbation) priority -= 30
+  if (recentFailures > 0) priority -= recentFailures * 10
+  if (acc.usageCount === 0) priority -= 5
+  if (currentlyBlocked) priority = 0
+  // Phase D: Disabled accounts get lowest priority
+  if (isDisabled) priority = -1
+  
+  return {
+    alias: acc.alias,
+    isHealthy: !currentlyBlocked && !acc.authInvalid && !isDisabled,
+    isInProbation,
+    recentFailures,
+    priority
+  }
+}
+
 export async function getNextAccount(
   config: typeof DEFAULT_CONFIG
 ): Promise<RotationResult | null> {
+  // Phase E: Check and auto-clear expired/invalid force state
+  const autoClear = checkAndAutoClearForce()
+  if (autoClear.wasCleared) {
+    console.log(`[multi-auth] Force mode auto-cleared: ${autoClear.reason}`)
+  }
+  
+  // Phase E: Check if force mode is active
+  const forceActive = isForceActive()
+  const forceState = getForceState()
+  
   let store = loadStore()
   const aliases = Object.keys(store.accounts)
 
@@ -35,15 +105,62 @@ export async function getNextAccount(
   }
 
   const now = Date.now()
-  const availableAliases = aliases.filter(alias => {
+  
+  // Phase E: If force mode is active, never fall back to another alias.
+  if (forceActive && forceState.forcedAlias) {
+    const forcedAlias = forceState.forcedAlias
+    const forcedAccount = store.accounts[forcedAlias]
+    
+    if (forcedAccount) {
+      const health = evaluateAccountHealth(forcedAccount, now)
+      
+      if (health.isHealthy) {
+        const token = await ensureValidToken(forcedAlias)
+        if (token) {
+          store = updateAccount(forcedAlias, {
+            usageCount: (forcedAccount.usageCount || 0) + 1,
+            lastUsed: now,
+            limitError: undefined
+          })
+          
+          store.activeAlias = forcedAlias
+          store.lastRotation = now
+          saveStore(store)
+          
+          console.log(`[multi-auth] Force mode: using ${forcedAlias}`)
+          return {
+            account: store.accounts[forcedAlias],
+            token,
+            forceState: {
+              active: true,
+              alias: forcedAlias,
+              remainingMs: forceState.forcedUntil ? forceState.forcedUntil - now : 0
+            }
+          }
+        } else {
+          console.warn(`[multi-auth] Force mode: ${forcedAlias} token unavailable; refusing fallback`)
+          return null
+        }
+      } else {
+        console.warn(`[multi-auth] Force mode: ${forcedAlias} currently blocked; refusing fallback`)
+        return null
+      }
+    } else {
+      // Forced account no longer exists - clear force and proceed normally.
+      console.warn(`[multi-auth] Force mode: ${forcedAlias} not found, clearing force`)
+      clearForce()
+    }
+  }
+  
+  const healthMap = new Map<string, AccountHealth>()
+  for (const alias of aliases) {
     const acc = store.accounts[alias]
-    const notRateLimited = !acc.rateLimitedUntil || acc.rateLimitedUntil < now
-    const notModelUnsupported =
-      !acc.modelUnsupportedUntil || acc.modelUnsupportedUntil < now
-    const notWorkspaceDeactivated =
-      !acc.workspaceDeactivatedUntil || acc.workspaceDeactivatedUntil < now
-    const notInvalidated = !acc.authInvalid
-    return notRateLimited && notModelUnsupported && notWorkspaceDeactivated && notInvalidated
+    healthMap.set(alias, evaluateAccountHealth(acc, now))
+  }
+
+  const availableAliases = aliases.filter(alias => {
+    const health = healthMap.get(alias)
+    return health?.isHealthy === true
   })
 
   if (availableAliases.length === 0) {
@@ -58,12 +175,21 @@ export async function getNextAccount(
     return 60_000
   })()
 
+  const runtimeSettings = getRuntimeSettings()
+  const rotationStrategy = runtimeSettings.settings.rotationStrategy || config.rotationStrategy
+
   const buildCandidates = (): { aliases: string[]; nextIndex?: (selected: string) => number } => {
-    switch (config.rotationStrategy) {
+    switch (rotationStrategy) {
       case 'least-used': {
         const sorted = [...availableAliases].sort((a, b) => {
           const aa = store.accounts[a]
           const bb = store.accounts[b]
+          const healthA = healthMap.get(a)
+          const healthB = healthMap.get(b)
+          
+          const priorityDiff = (healthB?.priority || 0) - (healthA?.priority || 0)
+          if (priorityDiff !== 0) return priorityDiff
+          
           const usageDiff = (aa?.usageCount || 0) - (bb?.usageCount || 0)
           if (usageDiff !== 0) return usageDiff
           const lastDiff = (aa?.lastUsed || 0) - (bb?.lastUsed || 0)
@@ -73,18 +199,73 @@ export async function getNextAccount(
         return { aliases: sorted }
       }
       case 'random': {
-        return { aliases: shuffled(availableAliases) }
+        const sorted = [...availableAliases].sort((a, b) => {
+          const healthA = healthMap.get(a)
+          const healthB = healthMap.get(b)
+          return (healthB?.priority || 0) - (healthA?.priority || 0)
+        })
+        const topPriority = sorted.slice(0, Math.ceil(sorted.length / 2))
+        return { aliases: shuffled(topPriority.length > 0 ? topPriority : sorted) }
+      }
+      // Phase F: Weighted round-robin
+      case 'weighted-round-robin': {
+        const weights = runtimeSettings.settings.accountWeights
+        
+        // Filter to healthy accounts with weights
+        const weightedAliases = availableAliases.filter(alias => (weights[alias] || 0) > 0)
+        
+        if (weightedAliases.length === 0) {
+          // Fallback to round-robin if no weights defined
+          const sorted = [...availableAliases].sort((a, b) => {
+            const healthA = healthMap.get(a)
+            const healthB = healthMap.get(b)
+            return (healthB?.priority || 0) - (healthA?.priority || 0)
+          })
+          const start = store.rotationIndex % sorted.length
+          const rr = sorted.map(
+            (_, i) => sorted[(start + i) % sorted.length]
+          )
+          const nextIndex = (selected: string): number => {
+            const idx = sorted.indexOf(selected)
+            if (idx < 0) return store.rotationIndex
+            return (idx + 1) % sorted.length
+          }
+          return { aliases: rr, nextIndex }
+        }
+        
+        // Use weighted selection
+        const selected = calculateWeightedSelection(weightedAliases, weights)
+        if (!selected) {
+          // Fallback to round-robin
+          const sorted = [...availableAliases].sort((a, b) => {
+            const healthA = healthMap.get(a)
+            const healthB = healthMap.get(b)
+            return (healthB?.priority || 0) - (healthA?.priority || 0)
+          })
+          const start = store.rotationIndex % sorted.length
+          const rr = sorted.map(
+            (_, i) => sorted[(start + i) % sorted.length]
+          )
+          return { aliases: rr }
+        }
+        
+        return { aliases: [selected] }
       }
       case 'round-robin':
       default: {
-        const start = store.rotationIndex % availableAliases.length
-        const rr = availableAliases.map(
-          (_, i) => availableAliases[(start + i) % availableAliases.length]
+        const sorted = [...availableAliases].sort((a, b) => {
+          const healthA = healthMap.get(a)
+          const healthB = healthMap.get(b)
+          return (healthB?.priority || 0) - (healthA?.priority || 0)
+        })
+        const start = store.rotationIndex % sorted.length
+        const rr = sorted.map(
+          (_, i) => sorted[(start + i) % sorted.length]
         )
         const nextIndex = (selected: string): number => {
-          const idx = availableAliases.indexOf(selected)
+          const idx = sorted.indexOf(selected)
           if (idx < 0) return store.rotationIndex
-          return (idx + 1) % availableAliases.length
+          return (idx + 1) % sorted.length
         }
         return { aliases: rr, nextIndex }
       }
@@ -96,8 +277,6 @@ export async function getNextAccount(
   for (const candidate of candidates) {
     const token = await ensureValidToken(candidate)
     if (!token) {
-      // Don't hard-fail the whole system on a single broken account.
-      // Put it on a short cooldown so rotation can keep working.
       store = updateAccount(candidate, {
         rateLimitedUntil: now + tokenFailureCooldownMs,
         limitError: '[multi-auth] Token unavailable (refresh failed?)',
@@ -119,18 +298,30 @@ export async function getNextAccount(
     }
     saveStore(store)
 
-    return { account: store.accounts[candidate], token }
+    const currentForceState = getForceState()
+    return {
+      account: store.accounts[candidate],
+      token,
+      forceState: {
+        active: isForceActive(),
+        alias: currentForceState.forcedAlias,
+        remainingMs: currentForceState.forcedUntil ? currentForceState.forcedUntil - now : 0
+      }
+    }
   }
 
   console.error('[multi-auth] No available accounts (token refresh failed on all candidates).')
   return null
 }
 
-export function markRateLimited(alias: string, cooldownMs: number): void {
+export function markRateLimited(alias: string, rateLimitedUntil: number): void {
+  const now = Date.now()
+  const safeUntil = Math.max(rateLimitedUntil, now + 1000)
+  const seconds = Math.max(1, Math.ceil((safeUntil - now) / 1000))
   updateAccount(alias, {
-    rateLimitedUntil: Date.now() + cooldownMs
+    rateLimitedUntil: safeUntil
   })
-  console.warn(`[multi-auth] Account ${alias} marked rate-limited for ${cooldownMs / 1000}s`)
+  console.warn(`[multi-auth] Account ${alias} marked rate-limited for ${seconds}s`)
 }
 
 export function clearRateLimit(alias: string): void {

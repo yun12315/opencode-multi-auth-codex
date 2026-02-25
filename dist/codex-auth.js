@@ -2,8 +2,16 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { addAccount, loadStore, setActiveAlias, updateAccount } from './store.js';
+const CODEX_AUTH_FILE_ENV = 'OPENCODE_MULTI_AUTH_CODEX_AUTH_FILE';
+function getCodexAuthFilePath() {
+    const override = process.env[CODEX_AUTH_FILE_ENV];
+    if (override && override.trim())
+        return path.resolve(override.trim());
+    const CODEX_DIR = path.join(os.homedir(), '.codex');
+    return path.join(CODEX_DIR, 'auth.json');
+}
 const CODEX_DIR = path.join(os.homedir(), '.codex');
-const CODEX_AUTH_FILE = path.join(CODEX_DIR, 'auth.json');
+const CODEX_AUTH_FILE = getCodexAuthFilePath();
 let lastFingerprint = null;
 let lastAuthError = null;
 export function getCodexAuthPath() {

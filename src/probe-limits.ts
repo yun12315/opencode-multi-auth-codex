@@ -10,13 +10,21 @@ const CODEX_CONFIG_PATH = path.join(os.homedir(), '.codex', 'config.toml')
 
 const DEFAULT_PROMPT = 'Reply ONLY with OK. Do not run any commands.'
 const EXEC_TIMEOUT_MS = 120_000
-const DEFAULT_PROBE_MODELS = ['gpt-5-codex', 'gpt-5.2-codex', 'gpt-5.3-codex']
+// Reordered to prefer gpt-5.3-codex first (Phase C requirement)
+const DEFAULT_PROBE_MODELS = ['gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5-codex']
+const DEFAULT_PROBE_EFFORT = 'low'
 
 export interface ProbeResult {
   rateLimits?: AccountRateLimits
   eventTs?: number
   sourceFile?: string
+  // Phase C: Add probe source diagnostics
+  probeModel?: string
+  probeEffort?: string
+  probeDurationMs?: number
   error?: string
+  // Phase C: Track if probe was authoritative (successful completion)
+  isAuthoritative?: boolean
 }
 
 function ensureDir(dir: string): void {
@@ -61,18 +69,31 @@ function copyConfigToml(dir: string): void {
   }
 }
 
-function shouldRetryWithFallback(error?: string): boolean {
+export function shouldRetryWithFallback(error?: string): boolean {
   if (!error) return false
   const text = error.toLowerCase()
   return (
     text.includes('model_not_found') ||
     text.includes('model is not supported') ||
     text.includes('requested model') ||
-    text.includes('does not exist')
+    text.includes('does not exist') ||
+    // Phase C: Handle reasoning.effort and unsupported_value errors
+    text.includes('unsupported_value') ||
+    text.includes('reasoning.effort') ||
+    text.includes('reasoning effort')
   )
 }
 
-function getProbeModels(): string[] {
+// Phase C: Get probe effort from environment or default to 'low'
+export function getProbeEffort(): string {
+  const envEffort = process.env.OPENCODE_MULTI_AUTH_PROBE_EFFORT
+  if (envEffort && ['low', 'medium', 'high'].includes(envEffort.toLowerCase())) {
+    return envEffort.toLowerCase()
+  }
+  return DEFAULT_PROBE_EFFORT
+}
+
+export function getProbeModels(): string[] {
   const raw = (process.env.OPENCODE_MULTI_AUTH_LIMITS_PROBE_MODELS || '').trim()
   const fromEnv = raw
     .split(',')
@@ -85,8 +106,9 @@ function getProbeModels(): string[] {
 
 async function runCodexExec(
   codexHome: string,
-  model?: string
-): Promise<{ ok: boolean; error?: string }> {
+  model?: string,
+  effort?: string
+): Promise<{ ok: boolean; error?: string; durationMs?: number }> {
   return new Promise((resolve) => {
     const args = [
       'exec',
@@ -99,10 +121,15 @@ async function runCodexExec(
     if (model) {
       args.push('-m', model)
     }
+    // Phase C: Add reasoning effort configuration
+    if (effort) {
+      args.push('-c', `model_reasoning_effort="${effort}"`)
+    }
     args.push(DEFAULT_PROMPT)
 
     let stderr = ''
     let stdout = ''
+    const startTime = Date.now()
 
     const child = spawn('codex', args, {
       env: { ...process.env, CODEX_HOME: codexHome },
@@ -111,7 +138,8 @@ async function runCodexExec(
 
     const timer = setTimeout(() => {
       child.kill('SIGTERM')
-      resolve({ ok: false, error: 'codex exec timed out' })
+      const durationMs = Date.now() - startTime
+      resolve({ ok: false, error: 'codex exec timed out', durationMs })
     }, EXEC_TIMEOUT_MS)
 
     child.stdout.on('data', (data) => {
@@ -125,16 +153,18 @@ async function runCodexExec(
 
     child.on('error', (err) => {
       clearTimeout(timer)
-      resolve({ ok: false, error: String(err) })
+      const durationMs = Date.now() - startTime
+      resolve({ ok: false, error: String(err), durationMs })
     })
 
     child.on('close', (code) => {
       clearTimeout(timer)
+      const durationMs = Date.now() - startTime
       if (code === 0) {
-        resolve({ ok: true })
+        resolve({ ok: true, durationMs })
       } else {
         const message = stderr.trim() || stdout.trim() || `codex exec failed (code ${code})`
-        resolve({ ok: false, error: message })
+        resolve({ ok: false, error: message, durationMs })
       }
     })
   })
@@ -148,41 +178,86 @@ export async function probeRateLimitsForAccount(account: AccountCredentials): Pr
 
   const sessionsDir = path.join(codexHome, 'sessions')
   const probeModels = getProbeModels()
+  const probeEffort = getProbeEffort()
   let lastError = 'No token_count events found in alias sessions'
   const attemptErrors: string[] = []
 
   for (let idx = 0; idx < probeModels.length; idx++) {
     const probeModel = probeModels[idx]
     const startedAt = Date.now()
-    const execResult = await runCodexExec(codexHome, probeModel)
+    
+    // Phase C: Pass effort config and track duration
+    const execResult = await runCodexExec(codexHome, probeModel, probeEffort)
     const latest = findLatestSessionRateLimits({
       sessionsDir,
       sinceMs: startedAt - 5_000
     })
 
-    if (latest?.rateLimits) {
+    // Phase C: Only accept authoritative data from successful completions
+    if (execResult.ok && latest?.rateLimits) {
       return {
         rateLimits: latest.rateLimits,
         eventTs: latest.eventTs,
-        sourceFile: latest.sourceFile
+        sourceFile: latest.sourceFile,
+        probeModel,
+        probeEffort,
+        probeDurationMs: execResult.durationMs,
+        isAuthoritative: true
       }
     }
 
     if (execResult.error) {
       lastError = execResult.error
-      attemptErrors.push(`[model=${probeModel}] ${execResult.error}`)
+      attemptErrors.push(`[model=${probeModel}, effort=${probeEffort}] ${execResult.error}`)
     }
 
     const hasNext = idx < probeModels.length - 1
     if (!hasNext) break
-    if (!shouldRetryWithFallback(execResult.error)) break
+    
+    // Phase C: Retry with fallback on unsupported_value / reasoning.effort errors
+    if (shouldRetryWithFallback(execResult.error)) {
+      // Try with 'low' effort explicitly if current effort failed
+      if (probeEffort !== 'low' && execResult.error?.toLowerCase().includes('reasoning')) {
+        const lowEffortResult = await runCodexExec(codexHome, probeModel, 'low')
+        const lowEffortLatest = findLatestSessionRateLimits({
+          sessionsDir,
+          sinceMs: Date.now() - 5_000
+        })
+        
+        if (lowEffortResult.ok && lowEffortLatest?.rateLimits) {
+          return {
+            rateLimits: lowEffortLatest.rateLimits,
+            eventTs: lowEffortLatest.eventTs,
+            sourceFile: lowEffortLatest.sourceFile,
+            probeModel,
+            probeEffort: 'low',
+            probeDurationMs: lowEffortResult.durationMs,
+            isAuthoritative: true
+          }
+        }
+        
+        if (lowEffortResult.error) {
+          attemptErrors.push(`[model=${probeModel}, effort=low] ${lowEffortResult.error}`)
+        }
+      }
+      continue
+    }
+    
+    // Don't retry if it's not a fallback-eligible error
+    break
   }
 
   if (attemptErrors.length > 0) {
-    return { error: attemptErrors[attemptErrors.length - 1] }
+    return { 
+      error: attemptErrors[attemptErrors.length - 1],
+      isAuthoritative: false
+    }
   }
 
-  return { error: lastError }
+  return { 
+    error: lastError,
+    isAuthoritative: false
+  }
 }
 
 export function getProbeHomeRoot(): string {

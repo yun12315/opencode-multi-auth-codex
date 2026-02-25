@@ -27,7 +27,7 @@ function getStoreFile(): string {
 }
 
 const STORE_ENV_PASSPHRASE = 'CODEX_SOFT_STORE_PASSPHRASE'
-const STORE_VERSION = 1
+const CURRENT_STORE_VERSION = 2
 
 type EncryptedStoreFile = {
   encrypted: true
@@ -38,9 +38,33 @@ type EncryptedStoreFile = {
   data: string
 }
 
+type StoreFileV1 = {
+  accounts: Record<string, AccountCredentials>
+  activeAlias: string | null
+  rotationIndex: number
+  lastRotation: number
+}
+
+type StoreFileV2 = StoreFileV1 & {
+  version: 2
+  settings?: {
+    rotationStrategy?: 'round-robin' | 'least-used' | 'random' | 'weighted-round-robin'
+  }
+  force?: {
+    forcedAlias: string | null
+    forcedUntil: number | null
+    previousRotationStrategy: string | null
+    forcedBy: string | null
+  }
+}
+
+type AnyStoreFile = StoreFileV1 | StoreFileV2
+
 let storeLocked = false
 let lastStoreError: string | null = null
 let lastStoreEncrypted = false
+let writeLock = false
+let writeLockQueue: Array<() => void> = []
 
 function ensureDir(): void {
   const dir = getStoreDir()
@@ -51,6 +75,7 @@ function ensureDir(): void {
 
 function emptyStore(): AccountStore {
   return {
+    version: CURRENT_STORE_VERSION,
     accounts: {},
     activeAlias: null,
     rotationIndex: 0,
@@ -81,7 +106,7 @@ function encryptStore(store: AccountStore, passphrase: string): EncryptedStoreFi
   const tag = cipher.getAuthTag()
   return {
     encrypted: true,
-    version: STORE_VERSION,
+    version: CURRENT_STORE_VERSION,
     salt: salt.toString('base64'),
     iv: iv.toString('base64'),
     tag: tag.toString('base64'),
@@ -99,6 +124,174 @@ function decryptStore(file: EncryptedStoreFile, passphrase: string): AccountStor
   decipher.setAuthTag(tag)
   const decrypted = Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8')
   return JSON.parse(decrypted) as AccountStore
+}
+
+function validateAccount(acc: any, alias: string): AccountCredentials | null {
+  if (!acc || typeof acc !== 'object') return null
+  if (typeof acc.accessToken !== 'string' || !acc.accessToken) return null
+  if (typeof acc.refreshToken !== 'string' || !acc.refreshToken) return null
+  if (typeof acc.expiresAt !== 'number') return null
+  
+  return {
+    alias,
+    accessToken: acc.accessToken,
+    refreshToken: acc.refreshToken,
+    idToken: typeof acc.idToken === 'string' ? acc.idToken : undefined,
+    accountId: typeof acc.accountId === 'string' ? acc.accountId : undefined,
+    expiresAt: acc.expiresAt,
+    email: typeof acc.email === 'string' ? acc.email : undefined,
+    lastRefresh: typeof acc.lastRefresh === 'string' ? acc.lastRefresh : undefined,
+    lastSeenAt: typeof acc.lastSeenAt === 'number' ? acc.lastSeenAt : undefined,
+    lastActiveUntil: typeof acc.lastActiveUntil === 'number' ? acc.lastActiveUntil : undefined,
+    lastUsed: typeof acc.lastUsed === 'number' ? acc.lastUsed : undefined,
+    usageCount: typeof acc.usageCount === 'number' ? acc.usageCount : 0,
+    rateLimitedUntil: typeof acc.rateLimitedUntil === 'number' ? acc.rateLimitedUntil : undefined,
+    modelUnsupportedUntil: typeof acc.modelUnsupportedUntil === 'number' ? acc.modelUnsupportedUntil : undefined,
+    modelUnsupportedAt: typeof acc.modelUnsupportedAt === 'number' ? acc.modelUnsupportedAt : undefined,
+    modelUnsupportedModel: typeof acc.modelUnsupportedModel === 'string' ? acc.modelUnsupportedModel : undefined,
+    modelUnsupportedError: typeof acc.modelUnsupportedError === 'string' ? acc.modelUnsupportedError : undefined,
+    workspaceDeactivatedUntil: typeof acc.workspaceDeactivatedUntil === 'number' ? acc.workspaceDeactivatedUntil : undefined,
+    workspaceDeactivatedAt: typeof acc.workspaceDeactivatedAt === 'number' ? acc.workspaceDeactivatedAt : undefined,
+    workspaceDeactivatedError: typeof acc.workspaceDeactivatedError === 'string' ? acc.workspaceDeactivatedError : undefined,
+    authInvalid: typeof acc.authInvalid === 'boolean' ? acc.authInvalid : undefined,
+    authInvalidatedAt: typeof acc.authInvalidatedAt === 'number' ? acc.authInvalidatedAt : undefined,
+    // Phase D: Account availability fields
+    enabled: typeof acc.enabled === 'boolean' ? acc.enabled : undefined,
+    disabledAt: typeof acc.disabledAt === 'number' ? acc.disabledAt : undefined,
+    disabledBy: typeof acc.disabledBy === 'string' ? acc.disabledBy : undefined,
+    disableReason: typeof acc.disableReason === 'string' ? acc.disableReason : undefined,
+    rateLimits: acc.rateLimits || undefined,
+    rateLimitHistory: Array.isArray(acc.rateLimitHistory) ? acc.rateLimitHistory : undefined,
+    limitStatus: typeof acc.limitStatus === 'string' ? acc.limitStatus : undefined,
+    limitError: typeof acc.limitError === 'string' ? acc.limitError : undefined,
+    lastLimitProbeAt: typeof acc.lastLimitProbeAt === 'number' ? acc.lastLimitProbeAt : undefined,
+    lastLimitErrorAt: typeof acc.lastLimitErrorAt === 'number' ? acc.lastLimitErrorAt : undefined,
+    limitsConfidence:
+      acc.limitsConfidence === 'fresh' ||
+      acc.limitsConfidence === 'stale' ||
+      acc.limitsConfidence === 'error' ||
+      acc.limitsConfidence === 'unknown'
+        ? acc.limitsConfidence
+        : undefined,
+    tags: Array.isArray(acc.tags) ? acc.tags : undefined,
+    notes: typeof acc.notes === 'string' ? acc.notes : undefined,
+    source: acc.source === 'opencode' || acc.source === 'codex' ? acc.source : undefined
+  }
+}
+
+function validateStore(data: any): AccountStore | null {
+  if (!data || typeof data !== 'object') return null
+  
+  const accounts: Record<string, AccountCredentials> = {}
+  const rawAccounts = data.accounts
+  if (rawAccounts && typeof rawAccounts === 'object') {
+    for (const [alias, acc] of Object.entries(rawAccounts)) {
+      const validated = validateAccount(acc, alias)
+      if (validated) {
+        accounts[alias] = validated
+      }
+    }
+  }
+  
+  return {
+    version: typeof data.version === 'number' ? data.version : undefined,
+    accounts,
+    activeAlias: typeof data.activeAlias === 'string' ? data.activeAlias : null,
+    rotationIndex: typeof data.rotationIndex === 'number' ? data.rotationIndex : 0,
+    lastRotation: typeof data.lastRotation === 'number' ? data.lastRotation : Date.now(),
+    // Phase E: Preserve force mode fields
+    forcedAlias: data.forcedAlias ?? null,
+    forcedUntil: data.forcedUntil ?? null,
+    previousRotationStrategy: data.previousRotationStrategy ?? null,
+    forcedBy: data.forcedBy ?? null,
+    // Phase F: Preserve rotation strategy and settings
+    rotationStrategy: data.rotationStrategy ?? 'round-robin',
+    settings: data.settings ?? undefined
+  }
+}
+
+function migrateV1toV2(data: StoreFileV1): StoreFileV2 {
+  return {
+    ...data,
+    version: 2,
+    settings: {
+      rotationStrategy: 'round-robin'
+    },
+    force: {
+      forcedAlias: null,
+      forcedUntil: null,
+      previousRotationStrategy: null,
+      forcedBy: null
+    }
+  }
+}
+
+function migrateStore(data: any): AccountStore | null {
+  if (!data || typeof data !== 'object') return null
+  
+  const version = typeof data.version === 'number' ? data.version : 1
+  
+  if (version > CURRENT_STORE_VERSION) {
+    console.warn(`[multi-auth] Store version ${version} is newer than supported ${CURRENT_STORE_VERSION}. Proceeding with caution.`)
+    return validateStore(data)
+  }
+  
+  let migrated: any = data
+  if (version === 1) {
+    migrated = migrateV1toV2(data as StoreFileV1)
+    console.log('[multi-auth] Migrated store from v1 to v2')
+  }
+  
+  return validateStore(migrated)
+}
+
+function getLastKnownGoodPath(): string {
+  return `${getStoreFile()}.lkg`
+}
+
+function saveLastKnownGood(store: AccountStore): void {
+  // Avoid writing plaintext snapshots when store encryption is enabled.
+  if (getPassphrase()) {
+    return
+  }
+
+  const lkgPath = getLastKnownGoodPath()
+  try {
+    fs.writeFileSync(lkgPath, JSON.stringify(store, null, 2), { mode: 0o600 })
+  } catch {
+    // ignore
+  }
+}
+
+function loadLastKnownGood(): AccountStore | null {
+  const lkgPath = getLastKnownGoodPath()
+  if (!fs.existsSync(lkgPath)) return null
+  try {
+    const data = fs.readFileSync(lkgPath, 'utf-8')
+    const parsed = JSON.parse(data)
+    return validateStore(parsed)
+  } catch {
+    return null
+  }
+}
+
+async function acquireWriteLock(): Promise<void> {
+  if (!writeLock) {
+    writeLock = true
+    return
+  }
+  return new Promise((resolve) => {
+    writeLockQueue.push(resolve)
+  })
+}
+
+function releaseWriteLock(): void {
+  const next = writeLockQueue.shift()
+  if (next) {
+    next()
+  } else {
+    writeLock = false
+  }
 }
 
 function buildSnapshot(window?: { remaining?: number; limit?: number; resetAt?: number }): RateLimitSnapshot | undefined {
@@ -163,7 +356,20 @@ export function loadStore(): AccountStore {
           return emptyStore()
         }
         try {
-          return decryptStore(parsed, passphrase)
+          const decrypted = decryptStore(parsed, passphrase)
+          const validated = validateStore(decrypted)
+          if (validated) {
+            saveLastKnownGood(validated)
+            return validated
+          }
+          storeLocked = true
+          lastStoreError = 'Store validation failed after decryption.'
+          const lkg = loadLastKnownGood()
+          if (lkg) {
+            console.warn('[multi-auth] Restored from last-known-good snapshot')
+            return lkg
+          }
+          return emptyStore()
         } catch (err) {
           storeLocked = true
           lastStoreError = 'Failed to decrypt store. Check passphrase.'
@@ -171,11 +377,33 @@ export function loadStore(): AccountStore {
           return emptyStore()
         }
       }
-      return parsed as AccountStore
-    } catch {
+      
+      const migrated = migrateStore(parsed)
+      if (migrated) {
+        saveLastKnownGood(migrated)
+        return migrated
+      }
+      
+      storeLocked = true
+      lastStoreError = 'Store validation failed.'
+      console.error('[multi-auth] Store validation failed')
+      
+      const lkg = loadLastKnownGood()
+      if (lkg) {
+        console.warn('[multi-auth] Restored from last-known-good snapshot')
+        return lkg
+      }
+      return emptyStore()
+    } catch (err) {
       storeLocked = true
       lastStoreError = 'Failed to parse store. Store locked until fixed.'
-      console.error('[multi-auth] Failed to parse store, resetting')
+      console.error('[multi-auth] Failed to parse store:', err)
+      
+      const lkg = loadLastKnownGood()
+      if (lkg) {
+        console.warn('[multi-auth] Restored from last-known-good snapshot')
+        return lkg
+      }
     }
   }
   return emptyStore()
@@ -193,7 +421,6 @@ export function saveStore(store: AccountStore): void {
   const payload = passphrase ? encryptStore(store, passphrase) : store
   const json = JSON.stringify(payload, null, 2)
 
-  // Best-effort backup to help recover from crashes/corruption.
   try {
     if (fs.existsSync(file)) {
       fs.copyFileSync(file, `${file}.bak`)
@@ -227,7 +454,6 @@ export function saveStore(store: AccountStore): void {
   try {
     fs.renameSync(tmp, file)
   } catch (err: any) {
-    // Windows can fail to rename over an existing file.
     if (err?.code === 'EPERM' || err?.code === 'EEXIST') {
       try {
         fs.unlinkSync(file)
@@ -246,9 +472,32 @@ export function saveStore(store: AccountStore): void {
   }
 
   try {
+    const dirFd = fs.openSync(getStoreDir(), 'r')
+    try {
+      fs.fsyncSync(dirFd)
+    } catch {
+      // ignore
+    }
+    fs.closeSync(dirFd)
+  } catch {
+    // ignore
+  }
+
+  try {
     fs.chmodSync(file, 0o600)
   } catch {
     // ignore
+  }
+
+  saveLastKnownGood(store)
+}
+
+export async function withWriteLock<T>(fn: () => T): Promise<T> {
+  await acquireWriteLock()
+  try {
+    return fn()
+  } finally {
+    releaseWriteLock()
   }
 }
 
