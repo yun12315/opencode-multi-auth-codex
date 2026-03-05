@@ -100,14 +100,16 @@ function normalizeModel(model) {
     if (!model)
         return 'gpt-5.1';
     const modelId = model.includes('/') ? model.split('/').pop() : model;
-    const baseModel = modelId.replace(/-(?:none|low|medium|high|xhigh)$/, '');
-    // OpenCode currently allowlists gpt-5.2-codex, but we can route it to the latest
+    const baseModel = modelId.replace(/-(?:fast|none|minimal|low|medium|high|xhigh)$/, '');
+    // OpenCode may lag behind the latest ChatGPT Codex model allowlist. Route known
+    // older Codex selections to the latest backend model when enabled.
     // Codex model on the ChatGPT backend for users who want the newest model without
     // waiting for upstream registry updates.
     const preferLatestRaw = process.env.OPENCODE_MULTI_AUTH_PREFER_CODEX_LATEST;
     const preferLatest = preferLatestRaw !== '0' && preferLatestRaw !== 'false';
-    if (preferLatest && (baseModel === 'gpt-5.2-codex' || baseModel === 'gpt-5-codex')) {
-        const latestModel = (process.env.OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL || 'gpt-5.3-codex').trim();
+    if (preferLatest &&
+        (baseModel === 'gpt-5.3-codex' || baseModel === 'gpt-5.2-codex' || baseModel === 'gpt-5-codex')) {
+        const latestModel = (process.env.OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL || 'gpt-5.4').trim();
         if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
             console.log(`[multi-auth] model map: ${baseModel} -> ${latestModel}`);
         }
@@ -445,16 +447,17 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
             const injectModels = injectModelsRaw === '1' || injectModelsRaw === 'true';
             if (!injectModels)
                 return;
-            const latestModel = (process.env.OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL || 'gpt-5.3-codex').trim();
+            const latestModel = (process.env.OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL || 'gpt-5.4').trim();
             try {
                 const openai = config.provider?.[PROVIDER_ID] || null;
                 if (!openai || typeof openai !== 'object')
                     return;
                 openai.models ||= {};
                 if (!openai.models[latestModel]) {
+                    const latestName = latestModel === 'gpt-5.4' ? 'GPT-5.4' : latestModel;
                     openai.models[latestModel] = {
                         id: latestModel,
-                        name: 'GPT-5.3 Codex',
+                        name: latestName,
                         reasoning: true,
                         tool_call: true,
                         temperature: true,
@@ -512,6 +515,8 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                     }
                     const isStreaming = body?.stream === true;
                     const normalizedModel = normalizeModel(body.model);
+                    const fastMode = /-fast$/.test(body.model || '');
+                    const isCodexFamily = normalizedModel.includes('codex');
                     const reasoningMatch = body.model?.match(/-(none|low|medium|high|xhigh)$/);
                     const payload = {
                         ...body,
@@ -535,6 +540,18 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                             effort: reasoningMatch[1],
                             summary: payload.reasoning?.summary || 'auto'
                         };
+                    }
+                    if (fastMode) {
+                        payload.reasoning = {
+                            ...(payload.reasoning || {}),
+                            effort: payload.reasoning?.effort || (isCodexFamily ? 'low' : 'minimal'),
+                            summary: payload.reasoning?.summary || 'auto'
+                        };
+                        payload.text = {
+                            ...(payload.text || {}),
+                            verbosity: payload.text?.verbosity || (isCodexFamily ? 'medium' : 'low')
+                        };
+                        payload.service_tier = payload.service_tier || 'priority';
                     }
                     delete payload.reasoning_effort;
                     try {

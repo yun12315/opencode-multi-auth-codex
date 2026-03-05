@@ -233,12 +233,27 @@ This plugin can still use the newest model by **mapping** the selected Codex mod
 to the latest backend model on ChatGPT.
 
 Default behavior:
-- If you select `openai/gpt-5.2-codex` (or `openai/gpt-5-codex`), the plugin will send requests as `gpt-5.3-codex`.
+- If you select `openai/gpt-5.3-codex`, `openai/gpt-5.2-codex`, or `openai/gpt-5-codex`, the plugin will send requests as `gpt-5.4`.
 
 Environment variables:
 - `OPENCODE_MULTI_AUTH_PREFER_CODEX_LATEST=0` disables the mapping (use exact model).
-- `OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL=gpt-5.3-codex` overrides the target model.
-- `OPENCODE_MULTI_AUTH_DEBUG=1` prints mapping logs like: `model map: gpt-5.2-codex -> gpt-5.3-codex`.
+- `OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL=gpt-5.4` overrides the target model.
+- `OPENCODE_MULTI_AUTH_DEBUG=1` prints mapping logs like: `model map: gpt-5.3-codex -> gpt-5.4`.
+
+## Fast Mode
+
+The plugin also supports a `-fast` suffix for GPT-5 model variants it exposes.
+
+Examples:
+- `openai/gpt-5.4-fast`
+- `openai/gpt-5.3-codex-fast`
+- `openai/gpt-5.2-codex-fast`
+
+Behavior:
+- strips the `-fast` suffix before sending the backend model id
+- uses lower reasoning effort (`minimal` for GPT-5, `low` for Codex families)
+- lowers verbosity for non-Codex GPT-5 models
+- sets `service_tier=priority`
 
 ## Troubleshooting
 

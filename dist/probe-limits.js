@@ -7,7 +7,7 @@ const CODEX_HOME_ROOT = path.join(os.homedir(), '.codex-multi');
 const CODEX_CONFIG_PATH = path.join(os.homedir(), '.codex', 'config.toml');
 const DEFAULT_PROMPT = 'Reply ONLY with OK. Do not run any commands.';
 const EXEC_TIMEOUT_MS = 120_000;
-const DEFAULT_PROBE_MODELS = ['gpt-5-codex', 'gpt-5.2-codex', 'gpt-5.3-codex'];
+const DEFAULT_PROBE_MODELS = ['gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5-codex'];
 function ensureDir(dir) {
     if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
