@@ -10,8 +10,7 @@ const CODEX_CONFIG_PATH = path.join(os.homedir(), '.codex', 'config.toml')
 
 const DEFAULT_PROMPT = 'Reply ONLY with OK. Do not run any commands.'
 const EXEC_TIMEOUT_MS = 120_000
-// Reordered to prefer gpt-5.3-codex first (Phase C requirement)
-const DEFAULT_PROBE_MODELS = ['gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5-codex']
+const DEFAULT_PROBE_MODELS = ['gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5-codex']
 const DEFAULT_PROBE_EFFORT = 'low'
 
 export interface ProbeResult {

@@ -281,6 +281,62 @@ Outlook login often shows interstitial pages after password entry:
 - `OPENCODE_MULTI_AUTH_TRUNCATION`
 - `OPENCODE_MULTI_AUTH_DEBUG`
 
+## GPT-5.4 mapping
+
+The plugin can route older Codex selections to GPT-5.4 when you explicitly opt in.
+
+Default behavior:
+- exact model selection is preserved
+
+Environment variables:
+- `OPENCODE_MULTI_AUTH_PREFER_CODEX_LATEST=1` enables mapping to the latest backend model
+- `OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL=gpt-5.4` overrides the mapping target
+- `OPENCODE_MULTI_AUTH_DEBUG=1` prints model mapping debug logs
+
+## Fast Mode
+
+For OpenCode, the clean way to mirror Codex Fast mode is:
+
+- keep the model as `openai/gpt-5.4`
+- use a model variant such as `fast`
+- set `serviceTier=priority` in the variant config
+
+Behavior:
+- the backend model stays `gpt-5.4`
+- the plugin forwards the request with `service_tier=priority`
+- the plugin does not automatically lower reasoning or verbosity
+
+Recommended OpenCode config:
+
+```json
+{
+  "provider": {
+    "openai": {
+      "models": {
+        "gpt-5.4": {
+          "variants": {
+            "Medium Fast": {
+              "reasoningEffort": "medium",
+              "serviceTier": "priority"
+            },
+            "High Fast": {
+              "reasoningEffort": "high",
+              "serviceTier": "priority"
+            },
+            "XHigh Fast": {
+              "reasoningEffort": "xhigh",
+              "serviceTier": "priority"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+See [docs/gpt-5.4-fast-benchmark.md](./docs/gpt-5.4-fast-benchmark.md) for a continued-session benchmark summary.
+
 ### Feature flags
 
 - `OPENCODE_MULTI_AUTH_ANTIGRAVITY_ENABLED`

@@ -160,6 +160,7 @@ export interface ProviderModel {
     textVerbosity: string
     include: string[]
     store: boolean
+    service_tier?: string
   }
 }
 

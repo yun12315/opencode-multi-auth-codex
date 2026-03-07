@@ -102,6 +102,7 @@ export interface ProviderModel {
         textVerbosity: string;
         include: string[];
         store: boolean;
+        service_tier?: string;
     };
 }
 export declare const DEFAULT_CONFIG: PluginConfig;
