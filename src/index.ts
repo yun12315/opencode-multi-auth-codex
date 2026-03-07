@@ -16,6 +16,7 @@ import {
   markRateLimited,
   markWorkspaceDeactivated
 } from './rotation.js'
+import { getDefaultModels } from './models.js'
 import { getForceState, isForceActive } from './force-mode.js'
 import { getRuntimeSettings } from './settings.js'
 import { listAccounts, updateAccount, loadStore } from './store.js'
@@ -120,17 +121,21 @@ function normalizeModel(model: string | undefined): string {
   if (!model) return 'gpt-5.1'
 
   const modelId = model.includes('/') ? model.split('/').pop()! : model
-  const baseModel = modelId.replace(/-(?:none|low|medium|high|xhigh)$/, '')
+  const baseModel = modelId.replace(/-(?:fast|none|minimal|low|medium|high|xhigh)$/, '')
 
-  // OpenCode currently allowlists gpt-5.2-codex, but we can route it to the latest
+  // OpenCode may lag behind the latest ChatGPT Codex model allowlist. Route known
+  // older Codex selections to the latest backend model when enabled.
   // Codex model on the ChatGPT backend for users who want the newest model without
   // waiting for upstream registry updates.
   const preferLatestRaw = process.env.OPENCODE_MULTI_AUTH_PREFER_CODEX_LATEST
-  const preferLatest = preferLatestRaw !== '0' && preferLatestRaw !== 'false'
+  const preferLatest = preferLatestRaw === '1' || preferLatestRaw === 'true'
 
-  if (preferLatest && (baseModel === 'gpt-5.2-codex' || baseModel === 'gpt-5-codex')) {
+  if (
+    preferLatest &&
+    (baseModel === 'gpt-5.3-codex' || baseModel === 'gpt-5.2-codex' || baseModel === 'gpt-5-codex')
+  ) {
     const latestModel = (
-      process.env.OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL || 'gpt-5.3-codex'
+      process.env.OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL || 'gpt-5.4'
     ).trim()
 
     if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
@@ -542,30 +547,33 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
 	      const injectModels = injectModelsRaw === '1' || injectModelsRaw === 'true'
 	      if (!injectModels) return
 
-	      const latestModel = (process.env.OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL || 'gpt-5.3-codex').trim()
+	      const latestModel = (process.env.OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL || 'gpt-5.4').trim()
 	      try {
 	        const openai = (config.provider?.[PROVIDER_ID] as any) || null
 	        if (!openai || typeof openai !== 'object') return
 	        openai.models ||= {}
+          openai.whitelist ||= []
 
-	        if (!openai.models[latestModel]) {
-	          openai.models[latestModel] = {
-	            id: latestModel,
-	            name: 'GPT-5.3 Codex',
-	            reasoning: true,
-	            tool_call: true,
-	            temperature: true,
-	            limit: {
-	              // Be conservative: upstream model metadata changes over time and
-	              // incorrect limits prevent OpenCode's compaction from triggering.
-	              context: 200000,
-	              output: 8192
-	            }
-	          }
+          const defaultModels = getDefaultModels()
+          const injectedModelIds = [latestModel]
+          if (latestModel === 'gpt-5.4' && defaultModels['gpt-5.4-fast']) {
+            injectedModelIds.push('gpt-5.4-fast')
+          }
+
+	        for (const modelID of injectedModelIds) {
+            const model = defaultModels[modelID]
+	          if (!model || openai.models[modelID]) continue
+	          openai.models[modelID] = model
 	        }
 
+          for (const modelID of injectedModelIds) {
+            if (!openai.whitelist.includes(modelID)) {
+              openai.whitelist.unshift(modelID)
+            }
+          }
+
 	        if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
-	          console.log(`[multi-auth] injected ${latestModel} into runtime config`)
+	          console.log(`[multi-auth] injected runtime models: ${injectedModelIds.join(', ')}`)
 	        }
 	      } catch (err) {
         if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
@@ -680,6 +688,8 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
 
             const isStreaming = body?.stream === true
             const normalizedModel = normalizeModel(body.model)
+            const fastMode = /-fast$/.test(body.model || '')
+            const supportedFastMode = fastMode && normalizedModel === 'gpt-5.4'
             const reasoningMatch = body.model?.match(/-(none|low|medium|high|xhigh)$/)
 
             const payload: Record<string, any> = {
@@ -705,6 +715,20 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
                 effort: reasoningMatch[1],
                 summary: payload.reasoning?.summary || 'auto'
               }
+            }
+
+            if (supportedFastMode) {
+              payload.service_tier = payload.service_tier || 'priority'
+
+              if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
+                console.log('[multi-auth] fast mode enabled: gpt-5.4 + service_tier=priority')
+              }
+            } else if (fastMode && process.env.OPENCODE_MULTI_AUTH_DEBUG === '1') {
+              console.log(`[multi-auth] fast mode ignored for unsupported model: ${normalizedModel}`)
+            }
+
+            if (process.env.OPENCODE_MULTI_AUTH_DEBUG === '1' && payload.service_tier === 'priority') {
+              console.log(`[multi-auth] priority service tier requested for ${normalizedModel}`)
             }
 
             delete payload.reasoning_effort

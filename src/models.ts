@@ -6,7 +6,10 @@ const REASONING_LEVELS = ['none', 'low', 'medium', 'high', 'xhigh'] as const
 type ReasoningLevel = typeof REASONING_LEVELS[number]
 
 const MODEL_LIMITS: Record<string, { context: number; output: number }> = {
+  'gpt-5.4': { context: 272000, output: 128000 },
+  'gpt-5.3': { context: 272000, output: 128000 },
   'gpt-5.2': { context: 272000, output: 128000 },
+  'gpt-5.3-codex': { context: 272000, output: 128000 },
   'gpt-5.2-codex': { context: 272000, output: 128000 },
   'gpt-5.1': { context: 272000, output: 128000 },
   'gpt-5.1-codex': { context: 272000, output: 128000 },
@@ -38,6 +41,31 @@ function buildProviderModel(baseId: string, reasoning: ReasoningLevel): Provider
       textVerbosity: 'medium',
       include: ['reasoning.encrypted_content'],
       store: false
+    }
+  }
+}
+
+function supportsFastMode(baseId: string): boolean {
+  return baseId === 'gpt-5.4'
+}
+
+function buildFastProviderModel(baseId: string): ProviderModel {
+  const limits = getModelLimits(baseId)
+
+  return {
+    name: `${baseId} Fast (OAuth)`,
+    limit: limits,
+    modalities: {
+      input: ['text', 'image'],
+      output: ['text']
+    },
+    options: {
+      reasoningEffort: 'medium',
+      reasoningSummary: 'auto',
+      textVerbosity: 'medium',
+      include: ['reasoning.encrypted_content'],
+      store: false,
+      service_tier: 'priority'
     }
   }
 }
@@ -80,6 +108,10 @@ export function generateModelVariants(baseModels: OpenAIModel[]): Record<string,
       const variantId = `${baseId}-${level}`
       result[variantId] = buildProviderModel(baseId, level)
     }
+
+    if (supportsFastMode(baseId)) {
+      result[`${baseId}-fast`] = buildFastProviderModel(baseId)
+    }
   }
 
   return result
@@ -87,6 +119,9 @@ export function generateModelVariants(baseModels: OpenAIModel[]): Record<string,
 
 export function getDefaultModels(): Record<string, ProviderModel> {
   const defaults = [
+    'gpt-5.4',
+    'gpt-5.3',
+    'gpt-5.3-codex',
     'gpt-5.2',
     'gpt-5.2-codex',
     'gpt-5.1',
@@ -110,6 +145,10 @@ export function getDefaultModels(): Record<string, ProviderModel> {
 
       const variantId = `${baseId}-${level}`
       result[variantId] = buildProviderModel(baseId, level)
+    }
+
+    if (supportsFastMode(baseId)) {
+      result[`${baseId}-fast`] = buildFastProviderModel(baseId)
     }
   }
 
