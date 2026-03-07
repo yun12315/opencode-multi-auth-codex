@@ -45,9 +45,12 @@ function buildProviderModel(baseId: string, reasoning: ReasoningLevel): Provider
   }
 }
 
+function supportsFastMode(baseId: string): boolean {
+  return baseId === 'gpt-5.4'
+}
+
 function buildFastProviderModel(baseId: string): ProviderModel {
   const limits = getModelLimits(baseId)
-  const isCodex = baseId.includes('codex')
 
   return {
     name: `${baseId} Fast (OAuth)`,
@@ -57,9 +60,9 @@ function buildFastProviderModel(baseId: string): ProviderModel {
       output: ['text']
     },
     options: {
-      reasoningEffort: isCodex ? 'low' : 'minimal',
+      reasoningEffort: 'medium',
       reasoningSummary: 'auto',
-      textVerbosity: isCodex ? 'medium' : 'low',
+      textVerbosity: 'medium',
       include: ['reasoning.encrypted_content'],
       store: false,
       service_tier: 'priority'
@@ -106,7 +109,9 @@ export function generateModelVariants(baseModels: OpenAIModel[]): Record<string,
       result[variantId] = buildProviderModel(baseId, level)
     }
 
-    result[`${baseId}-fast`] = buildFastProviderModel(baseId)
+    if (supportsFastMode(baseId)) {
+      result[`${baseId}-fast`] = buildFastProviderModel(baseId)
+    }
   }
 
   return result
@@ -142,7 +147,9 @@ export function getDefaultModels(): Record<string, ProviderModel> {
       result[variantId] = buildProviderModel(baseId, level)
     }
 
-    result[`${baseId}-fast`] = buildFastProviderModel(baseId)
+    if (supportsFastMode(baseId)) {
+      result[`${baseId}-fast`] = buildFastProviderModel(baseId)
+    }
   }
 
   return result

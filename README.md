@@ -233,27 +233,56 @@ This plugin can still use the newest model by **mapping** the selected Codex mod
 to the latest backend model on ChatGPT.
 
 Default behavior:
-- If you select `openai/gpt-5.3-codex`, `openai/gpt-5.2-codex`, or `openai/gpt-5-codex`, the plugin will send requests as `gpt-5.4`.
+- If you opt in, selecting `openai/gpt-5.3-codex`, `openai/gpt-5.2-codex`, or `openai/gpt-5-codex` can be routed to `gpt-5.4`.
 
 Environment variables:
-- `OPENCODE_MULTI_AUTH_PREFER_CODEX_LATEST=0` disables the mapping (use exact model).
+- `OPENCODE_MULTI_AUTH_PREFER_CODEX_LATEST=1` enables the mapping (default is exact model).
 - `OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL=gpt-5.4` overrides the target model.
 - `OPENCODE_MULTI_AUTH_DEBUG=1` prints mapping logs like: `model map: gpt-5.3-codex -> gpt-5.4`.
 
 ## Fast Mode
 
-The plugin also supports a `-fast` suffix for GPT-5 model variants it exposes.
+For OpenCode, the clean way to mirror Codex Fast mode is:
 
-Examples:
-- `openai/gpt-5.4-fast`
-- `openai/gpt-5.3-codex-fast`
-- `openai/gpt-5.2-codex-fast`
+- keep the model as `openai/gpt-5.4`
+- use a model variant such as `fast`
+- set `serviceTier=priority` in the variant config
 
 Behavior:
-- strips the `-fast` suffix before sending the backend model id
-- uses lower reasoning effort (`minimal` for GPT-5, `low` for Codex families)
-- lowers verbosity for non-Codex GPT-5 models
-- sets `service_tier=priority`
+- the backend model stays `gpt-5.4`
+- the plugin forwards the request with `service_tier=priority`
+- the plugin does not automatically lower reasoning or verbosity
+
+Recommended OpenCode config:
+
+```json
+{
+  "provider": {
+    "openai": {
+      "models": {
+        "gpt-5.4": {
+          "variants": {
+            "Medium Fast": {
+              "reasoningEffort": "medium",
+              "serviceTier": "priority"
+            },
+            "High Fast": {
+              "reasoningEffort": "high",
+              "serviceTier": "priority"
+            },
+            "XHigh Fast": {
+              "reasoningEffort": "xhigh",
+              "serviceTier": "priority"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+See [docs/gpt-5.4-fast-benchmark.md](./docs/gpt-5.4-fast-benchmark.md) for a continued-session benchmark summary.
 
 ## Troubleshooting
 

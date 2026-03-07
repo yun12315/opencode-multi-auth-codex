@@ -37,9 +37,11 @@ function buildProviderModel(baseId, reasoning) {
         }
     };
 }
+function supportsFastMode(baseId) {
+    return baseId === 'gpt-5.4';
+}
 function buildFastProviderModel(baseId) {
     const limits = getModelLimits(baseId);
-    const isCodex = baseId.includes('codex');
     return {
         name: `${baseId} Fast (OAuth)`,
         limit: limits,
@@ -48,9 +50,9 @@ function buildFastProviderModel(baseId) {
             output: ['text']
         },
         options: {
-            reasoningEffort: isCodex ? 'low' : 'minimal',
+            reasoningEffort: 'medium',
             reasoningSummary: 'auto',
-            textVerbosity: isCodex ? 'medium' : 'low',
+            textVerbosity: 'medium',
             include: ['reasoning.encrypted_content'],
             store: false,
             service_tier: 'priority'
@@ -89,7 +91,9 @@ export function generateModelVariants(baseModels) {
             const variantId = `${baseId}-${level}`;
             result[variantId] = buildProviderModel(baseId, level);
         }
-        result[`${baseId}-fast`] = buildFastProviderModel(baseId);
+        if (supportsFastMode(baseId)) {
+            result[`${baseId}-fast`] = buildFastProviderModel(baseId);
+        }
     }
     return result;
 }
@@ -121,7 +125,9 @@ export function getDefaultModels() {
             const variantId = `${baseId}-${level}`;
             result[variantId] = buildProviderModel(baseId, level);
         }
-        result[`${baseId}-fast`] = buildFastProviderModel(baseId);
+        if (supportsFastMode(baseId)) {
+            result[`${baseId}-fast`] = buildFastProviderModel(baseId);
+        }
     }
     return result;
 }
