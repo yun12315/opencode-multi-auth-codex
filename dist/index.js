@@ -472,7 +472,7 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
         },
         config: async (config) => {
             const injectModelsRaw = process.env.OPENCODE_MULTI_AUTH_INJECT_MODELS;
-            const injectModels = injectModelsRaw === '1' || injectModelsRaw === 'true';
+            const injectModels = injectModelsRaw !== '0' && injectModelsRaw !== 'false';
             if (!injectModels)
                 return;
             const latestModel = (process.env.OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL || 'gpt-5.4').trim();

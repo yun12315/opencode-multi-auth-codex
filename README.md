@@ -85,6 +85,19 @@ In your OpenCode config (`~/.config/opencode/opencode.json`):
 }
 ```
 
+OpenCode support:
+- OpenCode `1.2.19+` includes built-in `gpt-5.4`
+- for older OpenCode builds, the plugin now backfills `gpt-5.4` and `gpt-5.4-fast` into runtime config by default
+- disable runtime model injection only if you explicitly want that behavior off:
+
+```bash
+export OPENCODE_MULTI_AUTH_INJECT_MODELS=0
+```
+
+Update existing installs:
+- restart OpenCode after updating the plugin
+- if your install is pinned or cached, re-sync the plugin source before testing new models
+
 ### From source
 
 ```bash
@@ -292,6 +305,7 @@ Environment variables:
 - `OPENCODE_MULTI_AUTH_PREFER_CODEX_LATEST=1` enables mapping to the latest backend model
 - `OPENCODE_MULTI_AUTH_CODEX_LATEST_MODEL=gpt-5.4` overrides the mapping target
 - `OPENCODE_MULTI_AUTH_DEBUG=1` prints model mapping debug logs
+- `OPENCODE_MULTI_AUTH_INJECT_MODELS=0` disables automatic runtime model backfill
 
 ## Fast Mode
 
