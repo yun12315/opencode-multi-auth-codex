@@ -4,6 +4,7 @@ export interface AccountCredentials {
     refreshToken: string;
     idToken?: string;
     accountId?: string;
+    planType?: string;
     expiresAt: number;
     email?: string;
     lastRefresh?: string;

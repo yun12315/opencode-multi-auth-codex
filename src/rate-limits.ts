@@ -61,6 +61,22 @@ function ensureWindow(update: RateLimitUpdate, key: keyof AccountRateLimits, now
   return update[key] as RateLimitWindow
 }
 
+export function hasMeaningfulRateLimitWindow(window: RateLimitWindow | undefined): boolean {
+  if (!window) return false
+  return (
+    typeof window.remaining === 'number' ||
+    typeof window.resetAt === 'number'
+  )
+}
+
+export function hasMeaningfulRateLimits(rateLimits: AccountRateLimits | undefined | null): boolean {
+  if (!rateLimits) return false
+  return (
+    hasMeaningfulRateLimitWindow(rateLimits.fiveHour) ||
+    hasMeaningfulRateLimitWindow(rateLimits.weekly)
+  )
+}
+
 export function extractRateLimitUpdate(headers: Headers): RateLimitUpdate | null {
   const update: RateLimitUpdate = {}
   const now = Date.now()
@@ -118,13 +134,16 @@ export function extractRateLimitUpdate(headers: Headers): RateLimitUpdate | null
     }
   }
 
-  return Object.keys(update).length > 0 ? update : null
+  return hasMeaningfulRateLimits(update) ? update : null
 }
 
 export function mergeRateLimits(
   existing: AccountRateLimits | undefined,
   update: RateLimitUpdate
 ): AccountRateLimits {
+  if (!hasMeaningfulRateLimits(update)) {
+    return existing || {}
+  }
   return {
     fiveHour: { ...(existing?.fiveHour || {}), ...(update.fiveHour || {}) },
     weekly: { ...(existing?.weekly || {}), ...(update.weekly || {}) }

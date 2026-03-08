@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import * as crypto from 'node:crypto'
+import { hasMeaningfulRateLimits } from './rate-limits.js'
 import type {
   AccountStore,
   AccountCredentials,
@@ -131,7 +132,14 @@ function validateAccount(acc: any, alias: string): AccountCredentials | null {
   if (typeof acc.accessToken !== 'string' || !acc.accessToken) return null
   if (typeof acc.refreshToken !== 'string' || !acc.refreshToken) return null
   if (typeof acc.expiresAt !== 'number') return null
-  
+
+  const rateLimitHistory = Array.isArray(acc.rateLimitHistory)
+    ? acc.rateLimitHistory.filter((entry: any) =>
+        hasMeaningfulRateLimits({ fiveHour: entry?.fiveHour, weekly: entry?.weekly })
+      )
+    : undefined
+  const rateLimits = hasMeaningfulRateLimits(acc.rateLimits) ? acc.rateLimits : undefined
+
   return {
     alias,
     accessToken: acc.accessToken,
@@ -160,8 +168,8 @@ function validateAccount(acc: any, alias: string): AccountCredentials | null {
     disabledAt: typeof acc.disabledAt === 'number' ? acc.disabledAt : undefined,
     disabledBy: typeof acc.disabledBy === 'string' ? acc.disabledBy : undefined,
     disableReason: typeof acc.disableReason === 'string' ? acc.disableReason : undefined,
-    rateLimits: acc.rateLimits || undefined,
-    rateLimitHistory: Array.isArray(acc.rateLimitHistory) ? acc.rateLimitHistory : undefined,
+    rateLimits,
+    rateLimitHistory: rateLimitHistory && rateLimitHistory.length > 0 ? rateLimitHistory : undefined,
     limitStatus: typeof acc.limitStatus === 'string' ? acc.limitStatus : undefined,
     limitError: typeof acc.limitError === 'string' ? acc.limitError : undefined,
     lastLimitProbeAt: typeof acc.lastLimitProbeAt === 'number' ? acc.lastLimitProbeAt : undefined,
@@ -304,7 +312,7 @@ function buildSnapshot(window?: { remaining?: number; limit?: number; resetAt?: 
 }
 
 function buildHistoryEntry(rateLimits?: { fiveHour?: any; weekly?: any }): RateLimitHistoryEntry | null {
-  if (!rateLimits?.fiveHour && !rateLimits?.weekly) return null
+  if (!hasMeaningfulRateLimits(rateLimits)) return null
   const updatedAtValues = [rateLimits?.fiveHour?.updatedAt, rateLimits?.weekly?.updatedAt].filter(
     (value): value is number => typeof value === 'number'
   )
