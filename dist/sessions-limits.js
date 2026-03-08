@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { hasMeaningfulRateLimits } from './rate-limits.js';
 const DEFAULT_SESSIONS_DIR = path.join(os.homedir(), '.codex', 'sessions');
 function toEpochMs(value) {
     if (value === undefined)
@@ -95,12 +96,16 @@ function parseLatestTokenCountFromFile(filePath, options) {
         const secondary = payload.rate_limits?.secondary;
         const fiveHour = isWeekly(primary) ? secondary : primary;
         const weekly = isWeekly(primary) ? primary : secondary;
+        const rateLimits = {
+            fiveHour: buildWindow(fiveHour, eventTs),
+            weekly: buildWindow(weekly, eventTs)
+        };
+        if (!hasMeaningfulRateLimits(rateLimits)) {
+            continue;
+        }
         return {
             eventTs,
-            rateLimits: {
-                fiveHour: buildWindow(fiveHour, eventTs),
-                weekly: buildWindow(weekly, eventTs)
-            }
+            rateLimits
         };
     }
     return null;

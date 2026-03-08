@@ -3,22 +3,44 @@ import { loadStore, updateAccount } from './store.js';
 import { probeRateLimitsForAccount } from './probe-limits.js';
 import { logError, logInfo } from './logger.js';
 import { calculateLimitsConfidence } from './types.js';
+import { fetchUsageRateLimitsForAccount } from './usage-limits.js';
 export async function refreshRateLimitsForAccount(account) {
     updateAccount(account.alias, { limitStatus: 'running', limitError: undefined });
     logInfo(`Refreshing limits for ${account.alias}`);
-    const probe = await probeRateLimitsForAccount(account);
-    // Phase C: Only accept authoritative limits from successful completed sessions
-    if (!probe.isAuthoritative || !probe.rateLimits) {
-        logError(`Limit probe failed for ${account.alias}: ${probe.error || 'Probe failed'}`);
+    const usage = await fetchUsageRateLimitsForAccount(account);
+    if (usage.rateLimits) {
         const now = Date.now();
-        const errorText = probe.error || 'Probe failed';
+        const updates = {
+            rateLimits: mergeRateLimits(account.rateLimits, usage.rateLimits),
+            limitStatus: 'success',
+            limitError: undefined,
+            lastLimitProbeAt: now,
+            limitsConfidence: calculateLimitsConfidence(now, account.lastLimitErrorAt, 'success')
+        };
+        if (usage.planType) {
+            updates.planType = usage.planType;
+        }
+        if (typeof usage.rateLimitedUntil === 'number' && usage.rateLimitedUntil > now) {
+            updates.rateLimitedUntil = usage.rateLimitedUntil;
+        }
+        updateAccount(account.alias, updates);
+        logInfo(`Limits refreshed for ${account.alias} via usage API`);
+        return { alias: account.alias, updated: true };
+    }
+    if (usage.error) {
+        logInfo(`Usage API limits lookup failed for ${account.alias}, falling back to probe: ${usage.error}`);
+    }
+    const probe = await probeRateLimitsForAccount(account);
+    if (!probe.isAuthoritative || !probe.rateLimits) {
+        const now = Date.now();
+        const errorText = usage.error || probe.error || 'Probe failed';
+        logError(`Limit refresh failed for ${account.alias}: ${errorText}`);
         const likelyRateLimit = isRateLimitErrorText(errorText);
         const parsedResetAt = parseRateLimitResetFromError(errorText, now);
         const fallbackResetAt = likelyRateLimit
             ? getBlockingRateLimitResetAt(account.rateLimits, now)
             : undefined;
         const rateLimitedUntil = parsedResetAt ?? fallbackResetAt;
-        // Phase C: Update only error metadata, preserve prior limits
         const updates = {
             limitStatus: 'error',
             limitError: errorText,
@@ -35,7 +57,6 @@ export async function refreshRateLimitsForAccount(account) {
             error: errorText
         };
     }
-    // Phase C: Only merge authoritative limits from successful probe
     const now = Date.now();
     updateAccount(account.alias, {
         rateLimits: mergeRateLimits(account.rateLimits, probe.rateLimits),
