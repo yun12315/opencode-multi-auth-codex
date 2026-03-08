@@ -409,6 +409,35 @@ Use `codextesting.md` for the Codex CLI live-testing checklist and copy-paste co
 - Run `npm run build` after source changes.
 - Keep manual/live tests sandboxed (temp HOME/store/auth paths).
 
+## Release flow
+
+- This plugin is commonly installed from `github:guard22/opencode-multi-auth-codex`, so every shipped update should bump `package.json` version. Reusing the same version on a new commit can leave cached installs looking unchanged.
+- Prepare the next release in one command:
+
+```bash
+npm run release -- 1.1.1
+# or: npm run release:patch
+```
+
+- The release script updates `package.json`, updates `package-lock.json`, and rebuilds `dist/`.
+- After that, cut the release from `main`:
+
+```bash
+git commit -m "chore: release v1.1.1"
+git tag v1.1.1
+git push origin main --follow-tags
+```
+
+- Users who want a pinned build can install a specific tag:
+
+```json
+{
+  "plugin": ["github:guard22/opencode-multi-auth-codex#v1.1.1"]
+}
+```
+
+- Users tracking `main` should restart OpenCode and re-sync plugin source after the new commit lands.
+
 ## License
 
 MIT
