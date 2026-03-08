@@ -41,35 +41,46 @@ const HTML = `<!doctype html>
       @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
 
       :root {
-        --bg: #0f1116;
-        --panel: #1a1e27;
-        --panel-2: #222836;
+        --bg: #101419;
+        --panel: #171c23;
+        --panel-2: #1d232c;
+        --panel-3: #252d38;
         --accent: #ffb547;
         --accent-2: #6ee7ff;
-        --text: #eef1f6;
-        --muted: #9aa4b2;
+        --text: #eef2f7;
+        --muted: #97a2b0;
         --danger: #ff6b6b;
         --success: #37d399;
         --warning: #f97316;
-        --shadow: rgba(15, 17, 22, 0.45);
+        --border-soft: rgba(255,255,255,0.08);
+        --border-strong: rgba(255,255,255,0.14);
+        --shadow: rgba(0, 0, 0, 0.2);
       }
 
-      * { box-sizing: border-box; }
+      * {
+        box-sizing: border-box;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+      }
+      *::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+      }
       body {
         margin: 0;
         font-family: 'Space Grotesk', sans-serif;
-        background:
-          radial-gradient(1200px 600px at 10% 0%, rgba(110, 231, 255, 0.08), transparent 60%),
-          radial-gradient(1200px 600px at 90% 10%, rgba(255, 181, 71, 0.1), transparent 55%),
-          var(--bg);
+        background: var(--bg);
         color: var(--text);
         min-height: 100vh;
+        line-height: 1.45;
       }
       header {
-        padding: 32px 28px 12px;
+        padding: 28px 28px 10px;
         display: flex;
         flex-direction: column;
         gap: 6px;
+        align-items: center;
+        text-align: center;
       }
       h1 {
         margin: 0;
@@ -77,20 +88,16 @@ const HTML = `<!doctype html>
         font-weight: 700;
         letter-spacing: -0.02em;
       }
-      .subtitle {
-        color: var(--muted);
-        font-size: 14px;
-      }
       .container {
         padding: 0 24px 40px;
         display: grid;
         gap: 18px;
       }
       .panel {
-        background: linear-gradient(180deg, rgba(26, 30, 39, 0.98), rgba(22, 26, 34, 0.98));
-        border: 1px solid rgba(255, 255, 255, 0.06);
+        background: var(--panel);
+        border: 1px solid var(--border-soft);
         border-radius: 18px;
-        box-shadow: 0 18px 40px var(--shadow);
+        box-shadow: 0 8px 24px var(--shadow);
         padding: 18px;
       }
       .meta {
@@ -100,6 +107,7 @@ const HTML = `<!doctype html>
       }
       .meta-item {
         background: var(--panel-2);
+        border: 1px solid var(--border-soft);
         border-radius: 14px;
         padding: 12px 14px;
       }
@@ -128,7 +136,7 @@ const HTML = `<!doctype html>
       .add-row input {
         flex: 1;
         background: var(--panel-2);
-        border: 1px solid rgba(255,255,255,0.08);
+        border: 1px solid var(--border-soft);
         border-radius: 12px;
         padding: 12px 14px;
         color: var(--text);
@@ -143,24 +151,24 @@ const HTML = `<!doctype html>
       }
       button {
         cursor: pointer;
-        border: none;
+        border: 1px solid transparent;
         border-radius: 10px;
         padding: 10px 14px;
         font-weight: 600;
         font-family: 'Space Grotesk', sans-serif;
         color: #0b0f14;
         background: var(--accent);
-        transition: transform 120ms ease, box-shadow 120ms ease;
+        transition: transform 120ms ease, background-color 120ms ease, border-color 120ms ease;
       }
       button.secondary {
-        background: transparent;
+        background: var(--panel-2);
         color: var(--text);
-        border: 1px solid rgba(255,255,255,0.1);
+        border: 1px solid var(--border-soft);
       }
       button.ghost {
-        background: transparent;
+        background: var(--panel-2);
         color: var(--muted);
-        border: 1px dashed rgba(255,255,255,0.12);
+        border: 1px solid var(--border-soft);
       }
       button.danger {
         background: var(--danger);
@@ -169,6 +177,9 @@ const HTML = `<!doctype html>
       button.small {
         padding: 6px 10px;
         font-size: 12px;
+      }
+      button:hover {
+        border-color: var(--border-strong);
       }
       button:active { transform: translateY(1px); }
       .filters {
@@ -181,8 +192,8 @@ const HTML = `<!doctype html>
         width: 100%;
         padding: 10px 12px;
         border-radius: 10px;
-        border: 1px solid rgba(255,255,255,0.1);
-        background: #141823;
+        border: 1px solid var(--border-soft);
+        background: var(--panel-2);
         color: var(--text);
         font-family: 'Space Grotesk', sans-serif;
       }
@@ -195,13 +206,13 @@ const HTML = `<!doctype html>
         width: 100%;
         height: 8px;
         border-radius: 999px;
-        background: rgba(255,255,255,0.08);
+        background: rgba(255,255,255,0.06);
         overflow: hidden;
       }
       .progress-fill {
         height: 100%;
         border-radius: 999px;
-        background: linear-gradient(90deg, var(--accent-2), var(--accent));
+        background: var(--accent);
         width: 0%;
         transition: width 160ms ease;
       }
@@ -214,16 +225,45 @@ const HTML = `<!doctype html>
         background: var(--panel);
         border-radius: 16px;
         padding: 16px;
-        border: 1px solid rgba(255,255,255,0.06);
+        border: 1px solid var(--border-soft);
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
         display: flex;
         flex-direction: column;
         gap: 12px;
+        height: 100%;
       }
       .account-title {
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         justify-content: space-between;
         gap: 8px;
+        min-height: 74px;
+      }
+      .account-heading {
+        min-width: 0;
+        display: grid;
+        gap: 4px;
+        align-content: start;
+      }
+      .account-name {
+        font-size: 18px;
+        font-weight: 600;
+        line-height: 1.2;
+        word-break: break-word;
+      }
+      .account-subtitle {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.35;
+        word-break: break-word;
+      }
+      .account-badges {
+        min-width: 94px;
+        min-height: 64px;
+        display: grid;
+        gap: 6px;
+        justify-items: end;
+        align-content: start;
       }
       .badge {
         font-size: 11px;
@@ -287,7 +327,7 @@ const HTML = `<!doctype html>
         position: relative;
         width: 44px;
         height: 24px;
-        background: rgba(255,255,255,0.1);
+        background: rgba(255,255,255,0.12);
         border-radius: 24px;
         transition: background 0.2s;
       }
@@ -334,24 +374,31 @@ const HTML = `<!doctype html>
         gap: 10px;
         align-items: center;
         padding: 12px 0;
-        border-top: 1px solid rgba(255,255,255,0.06);
-        border-bottom: 1px solid rgba(255,255,255,0.06);
+        border-top: 1px solid var(--border-soft);
+        border-bottom: 1px solid var(--border-soft);
       }
       .account-meta {
         display: grid;
         gap: 6px;
         font-size: 13px;
         color: var(--muted);
+        min-height: 110px;
+        align-content: start;
       }
       .limit-grid {
         display: grid;
         gap: 8px;
       }
       .limit-card {
-        background: #121620;
+        background: var(--panel-2);
+        border: 1px solid var(--border-soft);
         border-radius: 12px;
         padding: 10px 12px;
         font-size: 13px;
+        min-height: 138px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
       }
       .limit-card strong {
         display: block;
@@ -381,20 +428,30 @@ const HTML = `<!doctype html>
         flex-wrap: wrap;
         gap: 6px;
         align-items: center;
+        min-height: 32px;
       }
       .tag-chip {
         padding: 4px 8px;
         border-radius: 999px;
-        background: rgba(255,255,255,0.08);
+        background: var(--panel-3);
         font-size: 11px;
         color: var(--muted);
       }
       .notes {
         font-size: 12px;
         color: var(--muted);
-        background: rgba(255,255,255,0.04);
+        background: var(--panel-2);
+        border: 1px solid var(--border-soft);
         padding: 8px 10px;
         border-radius: 10px;
+        min-height: 46px;
+        display: flex;
+        align-items: center;
+      }
+      .card-footer {
+        margin-top: auto;
+        display: grid;
+        gap: 12px;
       }
       .meta-editor {
         display: none;
@@ -407,8 +464,8 @@ const HTML = `<!doctype html>
         width: 100%;
         padding: 8px 10px;
         border-radius: 10px;
-        border: 1px solid rgba(255,255,255,0.1);
-        background: #141823;
+        border: 1px solid var(--border-soft);
+        background: var(--panel-2);
         color: var(--text);
         font-family: 'Space Grotesk', sans-serif;
       }
@@ -425,11 +482,11 @@ const HTML = `<!doctype html>
         position: fixed;
         right: 18px;
         bottom: 18px;
-        background: #11151e;
-        border: 1px solid rgba(255,255,255,0.1);
+        background: var(--panel);
+        border: 1px solid var(--border-soft);
         padding: 12px 16px;
         border-radius: 12px;
-        box-shadow: 0 14px 30px var(--shadow);
+        box-shadow: 0 10px 24px var(--shadow);
         display: none;
       }
       .toast.show { display: block; }
@@ -440,10 +497,10 @@ const HTML = `<!doctype html>
         gap: 12px;
       }
       .log-box {
-        background: #0b0f14;
+        background: #12171d;
         border-radius: 12px;
         padding: 12px;
-        border: 1px solid rgba(255,255,255,0.08);
+        border: 1px solid var(--border-soft);
         font-family: 'JetBrains Mono', monospace;
         font-size: 12px;
         color: #d6dde8;
@@ -457,6 +514,7 @@ const HTML = `<!doctype html>
       }
       .ag-card {
         background: var(--panel-2);
+        border: 1px solid var(--border-soft);
         border-radius: 14px;
         padding: 12px 14px;
         display: grid;
@@ -544,7 +602,7 @@ const HTML = `<!doctype html>
       .toggle-slider {
         width: 44px;
         height: 24px;
-        background: rgba(255,255,255,0.1);
+        background: rgba(255,255,255,0.12);
         border-radius: 12px;
         position: relative;
         transition: background 0.2s;
@@ -579,7 +637,7 @@ const HTML = `<!doctype html>
       }
       #forceAliasSelect {
         background: var(--panel-2);
-        border: 1px solid rgba(255,255,255,0.1);
+        border: 1px solid var(--border-soft);
         border-radius: 8px;
         padding: 8px 12px;
         color: var(--text);
@@ -588,7 +646,7 @@ const HTML = `<!doctype html>
       }
       #rotationStrategySelect {
         background: var(--panel-2);
-        border: 1px solid rgba(255,255,255,0.1);
+        border: 1px solid var(--border-soft);
         border-radius: 8px;
         padding: 8px 12px;
         color: var(--text);
@@ -606,7 +664,6 @@ const HTML = `<!doctype html>
   <body>
     <header>
       <h1>Codex Token Dashboard</h1>
-      <div class="subtitle">Local console for ~/.codex/auth.json with manual limit refresh.</div>
     </header>
     <div class="container">
       <section class="panel">
@@ -1058,11 +1115,11 @@ const HTML = `<!doctype html>
           return \`
             <div class="account-card">
               <div class="account-title">
-                <div>
-                  <div style="font-size: 18px; font-weight: 600;">\${escapeHtml(acc.alias)}</div>
-                  <div style="color: var(--muted); font-size: 12px;">\${escapeHtml(acc.email || acc.accountId || 'unknown account')}</div>
+                <div class="account-heading">
+                  <div class="account-name">\${escapeHtml(acc.alias)}</div>
+                  <div class="account-subtitle">\${escapeHtml(acc.email || acc.accountId || 'unknown account')}</div>
                 </div>
-                <div style="display: grid; gap: 6px; justify-items: end;">
+                <div class="account-badges">
                   <span class="\${badgeClass}">\${badge}</span>
                   \${recommended ? '<span class="badge recommended">Recommended</span>' : ''}
                   <span class="\${statusClass}">\${statusLabel}</span>
@@ -1076,31 +1133,33 @@ const HTML = `<!doctype html>
                 \${acc.limitError ? \`<div style="color: var(--danger);">Limit error: \${escapeHtml(acc.limitError)}</div>\` : ''}
               </div>
               <div class="limit-grid">\${limitBlocks || '<span class="notice">No rate-limit data yet.</span>'}</div>
-              <div class="tag-row">
-                \${tags || '<span class="notice">No tags yet.</span>'}
-                <button class="ghost small" data-action="edit-meta" data-alias="\${escapeHtml(acc.alias)}">Edit tags/notes</button>
-              </div>
-              <div class="notes">\${notes}</div>
-              <div class="meta-editor" data-editor="\${escapeHtml(acc.alias)}">
-                <input data-field="tags" placeholder="tags: work, personal" value="\${escapeHtml((acc.tags || []).join(', '))}" />
-                <textarea data-field="notes" rows="3" placeholder="Notes">\${escapeHtml(acc.notes || '')}</textarea>
-                <button class="secondary small" data-action="save-meta" data-alias="\${escapeHtml(acc.alias)}">Save</button>
-              </div>
-              <!-- Phase D: Account controls with Enabled switch and Re-auth -->
-              <div class="account-controls">
-                <label class="toggle-switch" data-alias="\${escapeHtml(acc.alias)}">
-                  <input type="checkbox" \${acc.enabled !== false ? 'checked' : ''} data-action="toggle-enabled" data-alias="\${escapeHtml(acc.alias)}" />
-                  <span class="toggle-slider"></span>
-                  <span class="toggle-label">\${acc.enabled !== false ? 'Enabled' : 'Disabled'}</span>
-                </label>
-                <button class="secondary" data-action="reauth" data-alias="\${escapeHtml(acc.alias)}">Re-auth</button>
-              </div>
-              <div class="card-actions">
-                <button data-action="switch" data-alias="\${escapeHtml(acc.alias)}">Use on device</button>
-                <button class="secondary" data-action="refresh-token" data-alias="\${escapeHtml(acc.alias)}">Refresh token</button>
-                <button class="secondary" data-action="refresh" data-alias="\${escapeHtml(acc.alias)}">Refresh limits</button>
-                <!-- Phase D: Remove button kept, but disable mechanism is now via toggle -->
-                <button class="danger" data-action="remove" data-alias="\${escapeHtml(acc.alias)}">Remove</button>
+              <div class="card-footer">
+                <div class="tag-row">
+                  \${tags || '<span class="notice">No tags yet.</span>'}
+                  <button class="ghost small" data-action="edit-meta" data-alias="\${escapeHtml(acc.alias)}">Edit tags/notes</button>
+                </div>
+                <div class="notes">\${notes}</div>
+                <div class="meta-editor" data-editor="\${escapeHtml(acc.alias)}">
+                  <input data-field="tags" placeholder="tags: work, personal" value="\${escapeHtml((acc.tags || []).join(', '))}" />
+                  <textarea data-field="notes" rows="3" placeholder="Notes">\${escapeHtml(acc.notes || '')}</textarea>
+                  <button class="secondary small" data-action="save-meta" data-alias="\${escapeHtml(acc.alias)}">Save</button>
+                </div>
+                <!-- Phase D: Account controls with Enabled switch and Re-auth -->
+                <div class="account-controls">
+                  <label class="toggle-switch" data-alias="\${escapeHtml(acc.alias)}">
+                    <input type="checkbox" \${acc.enabled !== false ? 'checked' : ''} data-action="toggle-enabled" data-alias="\${escapeHtml(acc.alias)}" />
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">\${acc.enabled !== false ? 'Enabled' : 'Disabled'}</span>
+                  </label>
+                  <button class="secondary" data-action="reauth" data-alias="\${escapeHtml(acc.alias)}">Re-auth</button>
+                </div>
+                <div class="card-actions">
+                  <button data-action="switch" data-alias="\${escapeHtml(acc.alias)}">Use on device</button>
+                  <button class="secondary" data-action="refresh-token" data-alias="\${escapeHtml(acc.alias)}">Refresh token</button>
+                  <button class="secondary" data-action="refresh" data-alias="\${escapeHtml(acc.alias)}">Refresh limits</button>
+                  <!-- Phase D: Remove button kept, but disable mechanism is now via toggle -->
+                  <button class="danger" data-action="remove" data-alias="\${escapeHtml(acc.alias)}">Remove</button>
+                </div>
               </div>
             </div>
           \`
