@@ -60,6 +60,18 @@ function ensureWindow(update, key, now) {
     }
     return update[key];
 }
+export function hasMeaningfulRateLimitWindow(window) {
+    if (!window)
+        return false;
+    return (typeof window.remaining === 'number' ||
+        typeof window.resetAt === 'number');
+}
+export function hasMeaningfulRateLimits(rateLimits) {
+    if (!rateLimits)
+        return false;
+    return (hasMeaningfulRateLimitWindow(rateLimits.fiveHour) ||
+        hasMeaningfulRateLimitWindow(rateLimits.weekly));
+}
 export function extractRateLimitUpdate(headers) {
     const update = {};
     const now = Date.now();
@@ -115,9 +127,12 @@ export function extractRateLimitUpdate(headers) {
             }
         }
     }
-    return Object.keys(update).length > 0 ? update : null;
+    return hasMeaningfulRateLimits(update) ? update : null;
 }
 export function mergeRateLimits(existing, update) {
+    if (!hasMeaningfulRateLimits(update)) {
+        return existing || {};
+    }
     return {
         fiveHour: { ...(existing?.fiveHour || {}), ...(update.fiveHour || {}) },
         weekly: { ...(existing?.weekly || {}), ...(update.weekly || {}) }

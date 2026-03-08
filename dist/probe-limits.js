@@ -144,7 +144,7 @@ export async function probeRateLimitsForAccount(account) {
     const sessionsDir = path.join(codexHome, 'sessions');
     const probeModels = getProbeModels();
     const probeEffort = getProbeEffort();
-    let lastError = 'No token_count events found in alias sessions';
+    let lastError = 'No usable rate_limits data found in current Codex session output';
     const attemptErrors = [];
     for (let idx = 0; idx < probeModels.length; idx++) {
         const probeModel = probeModels[idx];

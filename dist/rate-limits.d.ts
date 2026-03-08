@@ -1,5 +1,7 @@
-import type { AccountRateLimits } from './types.js';
+import type { AccountRateLimits, RateLimitWindow } from './types.js';
 type RateLimitUpdate = AccountRateLimits;
+export declare function hasMeaningfulRateLimitWindow(window: RateLimitWindow | undefined): boolean;
+export declare function hasMeaningfulRateLimits(rateLimits: AccountRateLimits | undefined | null): boolean;
 export declare function extractRateLimitUpdate(headers: Headers): RateLimitUpdate | null;
 export declare function mergeRateLimits(existing: AccountRateLimits | undefined, update: RateLimitUpdate): AccountRateLimits;
 export declare function parseRetryAfterHeader(retryAfter: string | null, now?: number): number | undefined;

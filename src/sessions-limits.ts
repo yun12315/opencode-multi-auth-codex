@@ -1,6 +1,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
+import { hasMeaningfulRateLimits } from './rate-limits.js'
 import type { AccountRateLimits, RateLimitWindow } from './types.js'
 
 const DEFAULT_SESSIONS_DIR = path.join(os.homedir(), '.codex', 'sessions')
@@ -119,12 +120,17 @@ function parseLatestTokenCountFromFile(
     const fiveHour = isWeekly(primary) ? secondary : primary
     const weekly = isWeekly(primary) ? primary : secondary
 
+    const rateLimits = {
+      fiveHour: buildWindow(fiveHour, eventTs),
+      weekly: buildWindow(weekly, eventTs)
+    }
+    if (!hasMeaningfulRateLimits(rateLimits)) {
+      continue
+    }
+
     return {
       eventTs,
-      rateLimits: {
-        fiveHour: buildWindow(fiveHour, eventTs),
-        weekly: buildWindow(weekly, eventTs)
-      }
+      rateLimits
     }
   }
 
