@@ -5,6 +5,8 @@ export interface AccountCredentials {
   refreshToken: string
   idToken?: string
   accountId?: string
+  accountUserId?: string
+  userId?: string
   planType?: string
   expiresAt: number // Unix timestamp
   email?: string

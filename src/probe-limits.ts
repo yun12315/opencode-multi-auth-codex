@@ -3,6 +3,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { spawn } from 'node:child_process'
 import { findLatestSessionRateLimits } from './sessions-limits.js'
+import { loadStore, updateAccount } from './store.js'
 import type { AccountCredentials, AccountRateLimits } from './types.js'
 
 const CODEX_HOME_ROOT = path.join(os.homedir(), '.codex-multi')
@@ -26,6 +27,144 @@ export interface ProbeResult {
   isAuthoritative?: boolean
 }
 
+interface ProbeAuthTokens {
+  accessToken?: string
+  refreshToken?: string
+  idToken?: string
+  accountId?: string
+  accountUserId?: string
+  userId?: string
+  planType?: string
+  email?: string
+  expiresAt?: number
+  lastRefresh?: string
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
+}
+
+function decodeJwtPayload(token: string | undefined): Record<string, any> | null {
+  if (!token) return null
+  try {
+    const parts = token.split('.')
+    if (parts.length !== 3) return null
+    const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    const padded = payload.padEnd(payload.length + ((4 - (payload.length % 4)) % 4), '=')
+    const decoded = Buffer.from(padded, 'base64').toString('utf-8')
+    return JSON.parse(decoded) as Record<string, any>
+  } catch {
+    return null
+  }
+}
+
+function getEmailFromClaims(claims: Record<string, any> | null): string | undefined {
+  if (!claims) return undefined
+  if (typeof claims.email === 'string') return claims.email
+  const profile = claims['https://api.openai.com/profile'] as { email?: string } | undefined
+  if (typeof profile?.email === 'string') return profile.email
+  return undefined
+}
+
+function getAuthClaim(claims: Record<string, any> | null): Record<string, any> | undefined {
+  if (!claims) return undefined
+  const auth = claims['https://api.openai.com/auth']
+  if (!auth || typeof auth !== 'object') return undefined
+  return auth as Record<string, any>
+}
+
+function readProbeAuthTokens(codexHome: string): ProbeAuthTokens | null {
+  const authPath = path.join(codexHome, 'auth.json')
+  if (!fs.existsSync(authPath)) return null
+
+  let parsed: any
+  try {
+    parsed = JSON.parse(fs.readFileSync(authPath, 'utf-8'))
+  } catch {
+    return null
+  }
+
+  const tokens = parsed?.tokens && typeof parsed.tokens === 'object' ? parsed.tokens : parsed
+  const accessToken = asString(tokens?.access_token ?? tokens?.accessToken ?? parsed?.access_token ?? parsed?.accessToken)
+  const refreshToken = asString(tokens?.refresh_token ?? tokens?.refreshToken ?? parsed?.refresh_token ?? parsed?.refreshToken)
+  const idToken = asString(tokens?.id_token ?? tokens?.idToken ?? parsed?.id_token ?? parsed?.idToken)
+  const accountIdFromToken = asString(tokens?.account_id ?? tokens?.accountId ?? parsed?.account_id ?? parsed?.accountId)
+
+  if (!accessToken && !refreshToken) return null
+
+  const accessClaims = decodeJwtPayload(accessToken)
+  const idClaims = decodeJwtPayload(idToken)
+  const authAccess = getAuthClaim(accessClaims)
+  const authId = getAuthClaim(idClaims)
+
+  const accountId =
+    accountIdFromToken ||
+    asString(authAccess?.chatgpt_account_id) ||
+    asString(authId?.chatgpt_account_id)
+  const accountUserId =
+    asString(authAccess?.chatgpt_account_user_id) ||
+    asString(authId?.chatgpt_account_user_id)
+  const userId =
+    asString(authAccess?.user_id) ||
+    asString(authAccess?.chatgpt_user_id) ||
+    asString(authId?.user_id) ||
+    asString(authId?.chatgpt_user_id)
+  const planType =
+    asString(authAccess?.chatgpt_plan_type) ||
+    asString(authId?.chatgpt_plan_type)
+  const email = getEmailFromClaims(idClaims) || getEmailFromClaims(accessClaims)
+
+  const exp = accessClaims?.exp ?? idClaims?.exp
+  const expiresAt = typeof exp === 'number' ? exp * 1000 : undefined
+  const lastRefresh = asString(parsed?.last_refresh ?? parsed?.lastRefresh)
+
+  return {
+    accessToken,
+    refreshToken,
+    idToken,
+    accountId,
+    accountUserId,
+    userId,
+    planType,
+    email,
+    expiresAt,
+    lastRefresh
+  }
+}
+
+function syncAccountTokensFromProbeHome(alias: string, codexHome: string): void {
+  const parsed = readProbeAuthTokens(codexHome)
+  if (!parsed?.accessToken || !parsed.refreshToken) return
+  const current = loadStore().accounts[alias]
+  const tokenChanged = Boolean(
+    current &&
+    (
+      current.accessToken !== parsed.accessToken ||
+      current.refreshToken !== parsed.refreshToken ||
+      (parsed.idToken && current.idToken !== parsed.idToken)
+    )
+  )
+
+  const updates: Partial<AccountCredentials> = {
+    accessToken: parsed.accessToken,
+    refreshToken: parsed.refreshToken,
+    lastSeenAt: Date.now(),
+    source: 'codex'
+  }
+  if (parsed.idToken) updates.idToken = parsed.idToken
+  if (parsed.accountId) updates.accountId = parsed.accountId
+  if (parsed.accountUserId) updates.accountUserId = parsed.accountUserId
+  if (parsed.userId) updates.userId = parsed.userId
+  if (parsed.planType) updates.planType = parsed.planType
+  if (parsed.email) updates.email = parsed.email
+  if (typeof parsed.expiresAt === 'number' && Number.isFinite(parsed.expiresAt)) {
+    updates.expiresAt = parsed.expiresAt
+  }
+  if (tokenChanged && parsed.lastRefresh) updates.lastRefresh = parsed.lastRefresh
+
+  updateAccount(alias, updates)
+}
+
 function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -41,17 +180,20 @@ function getAliasHome(alias: string): string {
 }
 
 function writeAuthJson(dir: string, account: AccountCredentials): void {
-  if (!account.accessToken || !account.refreshToken || !account.idToken) {
+  if (!account.accessToken || !account.refreshToken) {
     throw new Error('Missing tokens for alias')
+  }
+  const tokens: Record<string, any> = {
+    access_token: account.accessToken,
+    refresh_token: account.refreshToken,
+    account_id: account.accountId
+  }
+  if (account.idToken) {
+    tokens.id_token = account.idToken
   }
   const auth = {
     OPENAI_API_KEY: null,
-    tokens: {
-      id_token: account.idToken,
-      access_token: account.accessToken,
-      refresh_token: account.refreshToken,
-      account_id: account.accountId
-    },
+    tokens,
     last_refresh: new Date().toISOString()
   }
   const authPath = path.join(dir, 'auth.json')
@@ -187,6 +329,7 @@ export async function probeRateLimitsForAccount(account: AccountCredentials): Pr
     
     // Phase C: Pass effort config and track duration
     const execResult = await runCodexExec(codexHome, probeModel, probeEffort)
+    syncAccountTokensFromProbeHome(account.alias, codexHome)
     const latest = findLatestSessionRateLimits({
       sessionsDir,
       sinceMs: startedAt - 5_000
@@ -218,6 +361,7 @@ export async function probeRateLimitsForAccount(account: AccountCredentials): Pr
       // Try with 'low' effort explicitly if current effort failed
       if (probeEffort !== 'low' && execResult.error?.toLowerCase().includes('reasoning')) {
         const lowEffortResult = await runCodexExec(codexHome, probeModel, 'low')
+        syncAccountTokensFromProbeHome(account.alias, codexHome)
         const lowEffortLatest = findLatestSessionRateLimits({
           sessionsDir,
           sinceMs: Date.now() - 5_000

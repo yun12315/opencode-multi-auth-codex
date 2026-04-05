@@ -1,6 +1,6 @@
 {
   "name": "@guard22/opencode-multi-auth-codex",
-  "version": "1.1.2",
+  "version": "1.1.0",
   "description": "Multi-account OAuth rotation for OpenAI Codex with auto model discovery",
   "type": "module",
   "main": "./dist/index.js",
@@ -11,10 +11,6 @@
   "scripts": {
     "build": "tsc",
     "clean": "rm -rf dist",
-    "release": "node ./ops/release.mjs",
-    "release:patch": "node ./ops/release.mjs patch",
-    "release:minor": "node ./ops/release.mjs minor",
-    "release:major": "node ./ops/release.mjs major",
     "web": "node ./dist/cli.js web --port 3434 --host 127.0.0.1",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
     "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js tests/unit",
@@ -42,7 +38,9 @@
     "typescript": "^5.7.2"
   },
   "files": [
-    "dist"
+    "dist",
+    "auto-login/auto_login.py",
+    "auto-login/credentials.example.json"
   ],
   "repository": {
     "type": "git",
