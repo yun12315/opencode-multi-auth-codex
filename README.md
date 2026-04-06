@@ -77,11 +77,17 @@ Multi-account OAuth rotation plugin for OpenCode with a local dashboard, force m
 
 ### Plugin install (recommended)
 
-In your OpenCode config (`~/.config/opencode/opencode.json`):
+Install globally in one command:
+
+```bash
+opencode plugin @guard22/opencode-multi-auth-codex@latest --global
+```
+
+If you prefer config-based installation, OpenCode also supports:
 
 ```json
 {
-  "plugin": ["github:guard22/opencode-multi-auth-codex"]
+  "plugin": ["npm:@guard22/opencode-multi-auth-codex@latest"]
 }
 ```
 
@@ -95,8 +101,9 @@ export OPENCODE_MULTI_AUTH_INJECT_MODELS=0
 ```
 
 Update existing installs:
+- rerun `opencode plugin @guard22/opencode-multi-auth-codex@latest --global`
 - restart OpenCode after updating the plugin
-- if your install is pinned or cached, re-sync the plugin source before testing new models
+- if your install is pinned to a specific version, bump the version/tag explicitly before testing new models
 
 ### From source
 
@@ -411,32 +418,33 @@ Use `codextesting.md` for the Codex CLI live-testing checklist and copy-paste co
 
 ## Release flow
 
-- This plugin is commonly installed from `github:guard22/opencode-multi-auth-codex`, so every shipped update should bump `package.json` version. Reusing the same version on a new commit can leave cached installs looking unchanged.
-- Prepare the next release in one command:
+- This plugin is now intended to be installed from npm, so every shipped update should bump `package.json` version and publish a new package version. Reusing the same version on a new commit will leave users stuck on cached installs.
+- Prepare the next release by bumping the package version, rebuilding, and publishing:
 
 ```bash
-npm run release -- 1.1.1
-# or: npm run release:patch
+npm version 1.2.1 --no-git-tag-version
+npm install
+npm run build
+npm publish --access public
 ```
 
-- The release script updates `package.json`, updates `package-lock.json`, and rebuilds `dist/`.
-- After that, cut the release from `main`:
+- After that, cut the git release from `main`:
 
 ```bash
-git commit -m "chore: release v1.1.1"
-git tag v1.1.1
+git commit -m "chore: release v1.2.1"
+git tag v1.2.1
 git push origin main --follow-tags
 ```
 
-- Users who want a pinned build can install a specific tag:
+- Users who want a pinned build can install a specific npm version:
 
 ```json
 {
-  "plugin": ["github:guard22/opencode-multi-auth-codex#v1.1.1"]
+  "plugin": ["npm:@guard22/opencode-multi-auth-codex@1.2.1"]
 }
 ```
 
-- Users tracking `main` should restart OpenCode and re-sync plugin source after the new commit lands.
+- Users tracking `latest` should rerun the install command and restart OpenCode after a new package lands.
 
 ## License
 

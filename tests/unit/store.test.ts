@@ -62,6 +62,23 @@ describe('Store Operations', () => {
     expect(updated.accounts['test-alias'].email).toBe('updated@example.com')
   })
 
+  it('should persist accountUserId and userId across reload', () => {
+    addAccount('test-alias', {
+      accessToken: 'test-access-token',
+      refreshToken: 'test-refresh-token',
+      expiresAt: Date.now() + 3600000
+    })
+
+    updateAccount('test-alias', {
+      accountUserId: 'account-user-123',
+      userId: 'user-456'
+    })
+
+    const reloaded = loadStore()
+    expect(reloaded.accounts['test-alias'].accountUserId).toBe('account-user-123')
+    expect(reloaded.accounts['test-alias'].userId).toBe('user-456')
+  })
+
   it('should remove an account', () => {
     addAccount('alias1', {
       accessToken: 'token1',

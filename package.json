@@ -1,6 +1,6 @@
 {
   "name": "@guard22/opencode-multi-auth-codex",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Multi-account OAuth rotation for OpenAI Codex with auto model discovery",
   "type": "module",
   "main": "./dist/index.js",
@@ -42,6 +42,9 @@
     "auto-login/auto_login.py",
     "auto-login/credentials.example.json"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/guard22/opencode-multi-auth-codex"

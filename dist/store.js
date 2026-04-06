@@ -98,6 +98,8 @@ function validateAccount(acc, alias) {
         refreshToken: acc.refreshToken,
         idToken: typeof acc.idToken === 'string' ? acc.idToken : undefined,
         accountId: typeof acc.accountId === 'string' ? acc.accountId : undefined,
+        accountUserId: typeof acc.accountUserId === 'string' ? acc.accountUserId : undefined,
+        userId: typeof acc.userId === 'string' ? acc.userId : undefined,
         expiresAt: acc.expiresAt,
         email: typeof acc.email === 'string' ? acc.email : undefined,
         lastRefresh: typeof acc.lastRefresh === 'string' ? acc.lastRefresh : undefined,
