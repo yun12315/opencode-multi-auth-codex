@@ -9,6 +9,7 @@ Usage:
     python3 auto_login.py --email user@x  # Login specific account by email
     python3 auto_login.py --check         # Check which accounts need login
     python3 auto_login.py --visible       # Run browser in visible mode
+    python3 auto_login.py --email user@x --auth-url <url>  # Browser-only login for dashboard
 """
 
 import argparse
@@ -49,6 +50,47 @@ CREDENTIALS_FILE = SCRIPT_DIR / "credentials.json"
 BETWEEN_ACCOUNTS_DELAY = 5  # seconds between accounts
 
 
+def find_system_browser():
+    override = os.environ.get("OPENCODE_MULTI_AUTH_BROWSER")
+    if override and Path(override).is_file():
+        return override
+    for candidate in (
+        "google-chrome-stable",
+        "google-chrome",
+        "chrome",
+        "microsoft-edge-stable",
+        "microsoft-edge",
+        "msedge",
+    ):
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    return None
+
+
+def find_playwright_chromium():
+    cache_dir = Path.home() / ".cache" / "ms-playwright"
+    patterns = [
+        "chromium-*/chrome-linux64/chrome",
+        "chromium-*/chrome-linux/chrome",
+    ]
+    candidates = []
+    for pattern in patterns:
+        candidates.extend(cache_dir.glob(pattern))
+    existing = [path for path in candidates if path.is_file()]
+    if not existing:
+        return None
+    return str(sorted(existing)[-1])
+
+
+def find_browser_executable():
+    return find_system_browser() or find_playwright_chromium()
+
+
+def has_graphical_session():
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
 # ── PKCE (RFC 7636) ────────────────────────────────────────────────────────
 def generate_pkce():
     raw = secrets.token_bytes(32)
@@ -72,10 +114,11 @@ def build_auth_url(code_challenge, state, redirect_uri):
         "scope": " ".join(SCOPES),
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
+        "audience": "https://api.openai.com/v1",
         "id_token_add_organizations": "true",
         "codex_cli_simplified_flow": "true",
         "state": state,
-        "originator": "opencode",
+        "originator": "codex_cli_rs",
     }
     return f"{AUTHORIZE_URL}?{urllib.parse.urlencode(params)}"
 
@@ -239,12 +282,23 @@ def add_account_to_store(tokens):
 
 
 # ── Credentials ─────────────────────────────────────────────────────────────
-def load_credentials():
-    if not CREDENTIALS_FILE.exists():
-        print(f"[ERROR] Credentials file not found: {CREDENTIALS_FILE}")
+def load_credentials(credentials_path=None):
+    path = Path(credentials_path).expanduser() if credentials_path else CREDENTIALS_FILE
+    if not path.exists():
+        print(f"[ERROR] Credentials file not found: {path}")
         sys.exit(1)
-    with open(CREDENTIALS_FILE, "r") as f:
+    with open(path, "r") as f:
         return json.load(f)
+
+
+def _human_type(element, value, delay_ms=85):
+    element.click()
+    try:
+        element.press("Control+A")
+        element.press("Backspace")
+    except Exception:
+        pass
+    element.type(value, delay=delay_ms)
 
 
 # ── Outlook email verification code retrieval ──────────────────────────────
@@ -267,8 +321,8 @@ def _outlook_login(context, outlook_email, outlook_password):
             "input[name='loginfmt'], input[type='email'], input#i0116",
             timeout=15000,
         )
-        email_input.fill(outlook_email)
-        time.sleep(0.5)
+        _human_type(email_input, outlook_email)
+        time.sleep(0.8)
         mail_page.wait_for_selector(
             "input#idSIButton9, button#idSIButton9, button:has-text('Next')",
             timeout=10000,
@@ -281,8 +335,8 @@ def _outlook_login(context, outlook_email, outlook_password):
             "input[name='passwd'], input[type='password'], input#i0118",
             timeout=15000,
         )
-        pw_input.fill(outlook_password)
-        time.sleep(0.5)
+        _human_type(pw_input, outlook_password)
+        time.sleep(0.8)
         mail_page.wait_for_selector(
             "input#idSIButton9, button#idSIButton9, "
             "button:has-text('Sign in'), button:has-text('Next')",
@@ -485,7 +539,14 @@ class CallbackServer(BaseHTTPRequestHandler):
 
 
 # ── Main Playwright login flow ─────────────────────────────────────────────
-def login_account(email, chatgpt_password, outlook_password=None, headless=True):
+def login_account(
+    email,
+    chatgpt_password,
+    outlook_password=None,
+    headless=True,
+    auth_url_override=None,
+    external_callback=False,
+):
     """
     Full OAuth login. Strategy:
     1. Navigate to OpenAI auth
@@ -495,15 +556,34 @@ def login_account(email, chatgpt_password, outlook_password=None, headless=True)
     """
     from playwright.sync_api import sync_playwright
 
-    code_verifier, code_challenge = generate_pkce()
-    state = generate_state()
+    code_verifier = None
     redirect_uri = f"http://localhost:{REDIRECT_PORT}/auth/callback"
-    auth_url = build_auth_url(code_challenge, state, redirect_uri)
+    auth_url = auth_url_override
+
+    if not auth_url:
+        code_verifier, code_challenge = generate_pkce()
+        state = generate_state()
+        auth_url = build_auth_url(code_challenge, state, redirect_uri)
 
     with sync_playwright() as p:
+        chromium_path = find_browser_executable()
+        browser_name = Path(chromium_path).name if chromium_path else "playwright-chromium"
+        effective_headless = headless
+        if headless and chromium_path and has_graphical_session():
+            lowered_name = browser_name.lower()
+            if "chrome" in lowered_name or "edge" in lowered_name:
+                effective_headless = False
+                print(
+                    "  [0/5] Launching headed browser because OpenAI auth blocks headless sessions."
+                )
         browser = p.chromium.launch(
-            headless=headless,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+            headless=effective_headless,
+            executable_path=chromium_path,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+            ],
         )
         context = browser.new_context(
             user_agent=(
@@ -511,50 +591,260 @@ def login_account(email, chatgpt_password, outlook_password=None, headless=True)
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/131.0.0.0 Safari/537.36"
             ),
+            locale="en-US",
             viewport={"width": 1280, "height": 800},
         )
+        context.add_init_script(
+            """
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            window.chrome = window.chrome || { runtime: {} };
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            """
+        )
 
-        # Start the callback server before navigation
-        CallbackServer.captured_codes = []  # Reset for this run
-        server = HTTPServer(("localhost", REDIRECT_PORT), CallbackServer)
-        server.timeout = 1
-        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-        server_thread.start()
+        server = None
+        if not external_callback:
+            # Start the callback server before navigation
+            CallbackServer.captured_codes = []  # Reset for this run
+            server = HTTPServer(("localhost", REDIRECT_PORT), CallbackServer)
+            server.timeout = 1
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
 
         page = context.new_page()
 
-        # ── Step 1: Navigate to OpenAI auth
-        print(f"  [1/5] Navigating to OpenAI auth...")
-        page.goto(auth_url, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(3000)  # let page fully render
-
-        # ── Step 2: Enter email
-        print(f"  [2/5] Entering email: {email}")
-        try:
-            email_input = page.wait_for_selector(
-                "input[name='email'], input[type='email'], "
-                "input#email, input[name='username']",
-                timeout=15000,
-            )
-            email_input.fill(email)
-            time.sleep(0.5)
-            page.wait_for_selector(
-                "button[type='submit'], button:has-text('Continue')",
-                timeout=10000,
-            ).click()
-        except Exception as e:
-            _save_debug_screenshot_page(page, email, "email_step")
-            raise RuntimeError(f"Email step failed: {e}")
-
-        page.wait_for_timeout(3000)
-
-        # ── Step 3: Try "Log in with a one-time code" (preferred method)
-        otp_login_done = False
-        otp_link = page.query_selector(
+        otp_selector = (
             "button:has-text('one-time code'), a:has-text('one-time code'), "
             "button:has-text('Log in with a one-time code'), "
             "a:has-text('Log in with a one-time code')"
         )
+
+        def _on_local_callback():
+            current = page.url.lower()
+            return (
+                current.startswith("http://localhost:")
+                or current.startswith("http://127.0.0.1:")
+                or current.startswith("http://[::1]:")
+            )
+
+        def _has_callback():
+            return _on_local_callback() if external_callback else bool(CallbackServer.captured_codes)
+
+        def _page_title_lower():
+            try:
+                return page.title().lower()
+            except Exception:
+                return ""
+
+        def _body_text_lower():
+            try:
+                return page.inner_text("body").lower()
+            except Exception:
+                return ""
+
+        def _is_cloudflare_gate():
+            title = _page_title_lower()
+            body = _body_text_lower()
+            current_url = page.url.lower()
+            return (
+                "just a moment" in title
+                or "security verification" in body
+                or "__cf_chl_rt_tk=" in current_url
+                or "challenge-platform" in body
+            )
+
+        def _is_manual_verification_gate():
+            body = _body_text_lower()
+            return _is_cloudflare_gate() and (
+                "verify you are human" in body
+                or "verify that you are human" in body
+                or "i am human" in body
+                or bool(page.query_selector("input[type='checkbox']"))
+            )
+
+        def _is_timeout_screen():
+            title = _page_title_lower()
+            body = _body_text_lower()
+            return (
+                "oops, an error occurred" in body
+                or "operation timed out" in body
+                or "operation timed out" in title
+            )
+
+        def _retry_timeout_page():
+            retry_button = page.query_selector(
+                "button:has-text('Try again'), a:has-text('Try again')"
+            )
+            if retry_button:
+                retry_button.click()
+            else:
+                page.goto(auth_url, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(3000)
+
+        def _wait_for_auth_entry(timeout_ms=5 * 60 * 1000):
+            deadline = time.time() + (timeout_ms / 1000)
+            noted_cloudflare = False
+            noted_manual_verification = False
+            cloudflare_since = None
+            while time.time() < deadline:
+                if _has_callback():
+                    return
+                if page.query_selector(
+                    "input[name='email'], input[type='email'], "
+                    "input#email, input[name='username']"
+                ):
+                    return
+                if page.query_selector("input[name='password'], input[type='password']"):
+                    return
+                if _is_cloudflare_gate():
+                    if cloudflare_since is None:
+                        cloudflare_since = time.time()
+                    if _is_manual_verification_gate():
+                        if not noted_manual_verification:
+                            print(
+                                "  [1/5] Manual Cloudflare verification required. Complete it in the Chrome window."
+                            )
+                            try:
+                                page.bring_to_front()
+                            except Exception:
+                                pass
+                            noted_manual_verification = True
+                    elif (
+                        not noted_manual_verification
+                        and cloudflare_since
+                        and time.time() - cloudflare_since >= 12
+                    ):
+                        print(
+                            "  [1/5] Manual Cloudflare verification may be required. Complete it in the Chrome window if prompted."
+                        )
+                        try:
+                            page.bring_to_front()
+                        except Exception:
+                            pass
+                        noted_manual_verification = True
+                    elif not noted_cloudflare:
+                        print("  [1/5] Waiting for Cloudflare verification...")
+                        noted_cloudflare = True
+                elif _is_timeout_screen():
+                    print("  [1/5] OpenAI auth timed out before login form, retrying...")
+                    _retry_timeout_page()
+                    continue
+                else:
+                    cloudflare_since = None
+                page.wait_for_timeout(1000)
+            _save_debug_screenshot_page(page, email, "auth_entry")
+            if noted_manual_verification:
+                raise RuntimeError(
+                    "Auth entry page did not become ready because Cloudflare verification was not completed"
+                )
+            raise RuntimeError("Auth entry page did not become ready")
+
+        def _wait_for_next_auth_stage(timeout_ms=5 * 60 * 1000):
+            deadline = time.time() + (timeout_ms / 1000)
+            noted_manual_verification = False
+            cloudflare_since = None
+            while time.time() < deadline:
+                current_url = page.url.lower()
+                if _has_callback():
+                    return "ready"
+                if page.query_selector(otp_selector):
+                    return "ready"
+                if page.query_selector("input[name='password'], input[type='password']"):
+                    return "ready"
+                if "consent" in current_url or "email-verification" in current_url:
+                    return "ready"
+                if _is_timeout_screen():
+                    return "retry-email"
+                if _is_cloudflare_gate():
+                    if cloudflare_since is None:
+                        cloudflare_since = time.time()
+                    if _is_manual_verification_gate() or (
+                        not noted_manual_verification
+                        and cloudflare_since
+                        and time.time() - cloudflare_since >= 12
+                    ):
+                        if not noted_manual_verification:
+                            print(
+                                "  [2/5] Manual Cloudflare verification required. Complete it in the Chrome window."
+                            )
+                            try:
+                                page.bring_to_front()
+                            except Exception:
+                                pass
+                            noted_manual_verification = True
+                else:
+                    cloudflare_since = None
+                try:
+                    heading = page.query_selector("h1, h2, h3")
+                    if heading:
+                        heading_text = heading.inner_text().lower()
+                        if (
+                            "check your inbox" in heading_text
+                            or "continue" in heading_text
+                            or "authorize" in heading_text
+                            or "allow" in heading_text
+                        ):
+                            return "ready"
+                except Exception:
+                    pass
+                page.wait_for_timeout(750)
+            return "timeout"
+
+        # ── Step 1: Navigate to OpenAI auth
+        print(f"  [1/5] Navigating to OpenAI auth...")
+        page.goto(auth_url, wait_until="domcontentloaded", timeout=30000)
+        _wait_for_auth_entry()
+
+        # ── Step 2: Enter email
+        email_step_error = None
+        for attempt in range(1, 4):
+            print(f"  [2/5] Entering email (attempt {attempt}/3)...")
+            try:
+                _wait_for_auth_entry(timeout_ms=20000)
+                email_input = page.wait_for_selector(
+                    "input[name='email'], input[type='email'], "
+                    "input#email, input[name='username']",
+                    timeout=15000,
+                )
+                _human_type(email_input, email)
+                time.sleep(0.8)
+                page.wait_for_selector(
+                    "button[type='submit'], button:has-text('Continue')",
+                    timeout=10000,
+                ).click()
+                page.wait_for_timeout(3000)
+                next_stage = _wait_for_next_auth_stage(timeout_ms=20000)
+                if next_stage == "ready":
+                    email_step_error = None
+                    break
+                if next_stage == "retry-email" and attempt < 3:
+                    print("  [2/5] OpenAI returned a timeout page after email submit, retrying...")
+                    _retry_timeout_page()
+                    continue
+                email_step_error = RuntimeError(
+                    f"Email step stalled while waiting for the next auth stage ({next_stage})"
+                )
+            except Exception as e:
+                email_step_error = e
+                if attempt < 3:
+                    print(f"  [2/5] Email step failed: {e}. Retrying...")
+                    try:
+                        page.goto(auth_url, wait_until="domcontentloaded", timeout=30000)
+                        _wait_for_auth_entry(timeout_ms=20000)
+                    except Exception:
+                        pass
+                    continue
+            if email_step_error:
+                break
+
+        if email_step_error:
+            _save_debug_screenshot_page(page, email, "email_step")
+            raise RuntimeError(f"Email step failed: {email_step_error}")
+
+        # ── Step 3: Try "Log in with a one-time code" (preferred method)
+        otp_login_done = False
+        otp_link = page.query_selector(otp_selector)
 
         if otp_link and outlook_password:
             print(f"  [3/5] Using one-time code login (preferred)...")
@@ -567,8 +857,8 @@ def login_account(email, chatgpt_password, outlook_password=None, headless=True)
                     "input[name='email'], input[type='email']"
                 )
                 if otp_email_input:
-                    otp_email_input.fill(email)
-                    time.sleep(0.3)
+                    _human_type(otp_email_input, email)
+                    time.sleep(0.6)
                     submit = page.query_selector(
                         "button[type='submit'], button:has-text('Continue')"
                     )
@@ -590,15 +880,15 @@ def login_account(email, chatgpt_password, outlook_password=None, headless=True)
                     mail_page.close()
 
                     if otp_code:
-                        print(f"  [3/5] Entering one-time code: {otp_code}")
+                        print(f"  [3/5] Entering one-time code...")
                         code_input = page.wait_for_selector(
                             "input[name='code'], input[type='text'], "
                             "input[inputmode='numeric'], "
                             "input[placeholder*='ode']",
                             timeout=10000,
                         )
-                        code_input.fill(otp_code)
-                        time.sleep(0.5)
+                        _human_type(code_input, otp_code, delay_ms=110)
+                        time.sleep(0.8)
                         page.wait_for_selector(
                             "button[type='submit'], button:has-text('Continue')",
                             timeout=10000,
@@ -615,7 +905,7 @@ def login_account(email, chatgpt_password, outlook_password=None, headless=True)
                 print(f"  [3/5] OTP login error: {e}, trying password...")
 
         # ── Fallback: Password login
-        if not otp_login_done and not CallbackServer.captured_codes:
+        if not otp_login_done and not _has_callback():
             # Check if we're still on a page that needs password
             if "password" in page.url or page.query_selector("input[type='password']"):
                 print(f"  [3/5] Entering password (fallback)...")
@@ -624,8 +914,8 @@ def login_account(email, chatgpt_password, outlook_password=None, headless=True)
                         "input[name='password'], input[type='password']",
                         timeout=10000,
                     )
-                    pw_input.fill(chatgpt_password)
-                    time.sleep(0.5)
+                    _human_type(pw_input, chatgpt_password)
+                    time.sleep(0.8)
                     page.wait_for_selector(
                         "button[type='submit'], button:has-text('Continue'), "
                         "button:has-text('Log in'), button:has-text('Sign in')",
@@ -655,13 +945,13 @@ def login_account(email, chatgpt_password, outlook_password=None, headless=True)
                                     otp_code = _outlook_read_latest_code(mail_page)
                                     mail_page.close()
                                     if otp_code:
-                                        print(f"  [3/5] Entering OTP code: {otp_code}")
+                                        print(f"  [3/5] Entering OTP code...")
                                         ci = page.wait_for_selector(
                                             "input[name='code'], input[type='text']",
                                             timeout=10000,
                                         )
-                                        ci.fill(otp_code)
-                                        time.sleep(0.5)
+                                        _human_type(ci, otp_code, delay_ms=110)
+                                        time.sleep(0.8)
                                         page.wait_for_selector(
                                             "button[type='submit'], button:has-text('Continue')",
                                             timeout=10000,
@@ -674,7 +964,7 @@ def login_account(email, chatgpt_password, outlook_password=None, headless=True)
                     raise RuntimeError(f"Password step failed: {e}")
 
         # ── Step 4: Handle email verification (after password login)
-        if not CallbackServer.captured_codes and not otp_login_done:
+        if not _has_callback() and not otp_login_done:
             current_url = page.url
             needs_verification = "email-verification" in current_url
             if not needs_verification:
@@ -702,13 +992,13 @@ def login_account(email, chatgpt_password, outlook_password=None, headless=True)
                     vcode = _outlook_read_latest_code(mail_page)
                     mail_page.close()
                     if vcode:
-                        print(f"  [4/5] Entering verification code: {vcode}")
+                        print(f"  [4/5] Entering verification code...")
                         ci = page.wait_for_selector(
                             "input[name='code'], input[type='text']",
                             timeout=10000,
                         )
-                        ci.fill(vcode)
-                        time.sleep(0.5)
+                        _human_type(ci, vcode, delay_ms=110)
+                        time.sleep(0.8)
                         page.wait_for_selector(
                             "button[type='submit'], button:has-text('Continue')",
                             timeout=10000,
@@ -761,16 +1051,28 @@ def login_account(email, chatgpt_password, outlook_password=None, headless=True)
         # Poll for callback, periodically re-checking for consent/interstitials
         deadline = time.time() + 45
         checks = 0
-        while not CallbackServer.captured_codes and time.time() < deadline:
+        while (
+            (external_callback and not _on_local_callback())
+            or (not external_callback and not CallbackServer.captured_codes)
+        ) and time.time() < deadline:
             page.wait_for_timeout(1500)
             checks += 1
 
             # Every few iterations, re-check for consent or other buttons
-            if checks % 3 == 0 and not CallbackServer.captured_codes:
+            if checks % 3 == 0 and (
+                (external_callback and not _on_local_callback())
+                or (not external_callback and not CallbackServer.captured_codes)
+            ):
                 _try_handle_consent()
+                if _is_timeout_screen():
+                    print("  [5/5] OpenAI auth timed out after login, retrying current page...")
+                    _retry_timeout_page()
 
             # Also check for any stray "Continue" / "Accept" buttons on unknown pages
-            if checks % 5 == 0 and not CallbackServer.captured_codes:
+            if checks % 5 == 0 and (
+                (external_callback and not _on_local_callback())
+                or (not external_callback and not CallbackServer.captured_codes)
+            ):
                 try:
                     stray = page.query_selector(
                         "button:has-text('Continue'), button:has-text('Accept')"
@@ -785,19 +1087,33 @@ def login_account(email, chatgpt_password, outlook_password=None, headless=True)
                 except Exception:
                     pass
 
-        if not CallbackServer.captured_codes:
+        if external_callback and _on_local_callback():
+            print(f"  [DONE] Browser flow completed, callback reached local server.")
+            browser.close()
+            return email
+
+        if not external_callback and not CallbackServer.captured_codes:
             _save_debug_screenshot_page(page, email, "no_callback")
             print(f"  [ERROR] No OAuth code. URL: {page.url[:200]}")
             server.shutdown()
             browser.close()
             return None
 
+        if external_callback:
+            _save_debug_screenshot_page(page, email, "no_callback")
+            print(f"  [ERROR] No callback redirect. URL: {page.url[:200]}")
+            browser.close()
+            return None
+
         captured_code = CallbackServer.captured_codes[0]
-        print(f"  [CALLBACK] Got OAuth code: {captured_code[:20]}...")
+        print(f"  [CALLBACK] OAuth code captured.")
         server.shutdown()
         browser.close()
 
     # ── Exchange code for tokens
+    if external_callback:
+        return email
+
     print(f"  [DONE] Exchanging code for tokens...")
     tokens = exchange_code_for_tokens(captured_code, redirect_uri, code_verifier)
 
@@ -837,7 +1153,11 @@ def cmd_check(accounts):
     print()
 
 
-def cmd_login(targets, defaults, headless=True):
+def cmd_login(targets, defaults, headless=True, auth_url=None):
+    if auth_url and len(targets) != 1:
+        print("[ERROR] --auth-url mode requires exactly one target account")
+        return 0, len(targets)
+
     print(f"\n{'=' * 55}")
     print(f"  Auto-Login: {len(targets)} account(s)")
     print(f"{'=' * 55}\n")
@@ -858,7 +1178,12 @@ def cmd_login(targets, defaults, headless=True):
 
         try:
             result = login_account(
-                email, chatgpt_pw, outlook_password=outlook_pw, headless=headless
+                email,
+                chatgpt_pw,
+                outlook_password=outlook_pw,
+                headless=headless,
+                auth_url_override=auth_url,
+                external_callback=bool(auth_url),
             )
             if result:
                 print(f"  -> SUCCESS\n")
@@ -889,9 +1214,19 @@ def main():
     parser.add_argument("--email", type=str, help="Login by email")
     parser.add_argument("--check", action="store_true", help="Check account status")
     parser.add_argument("--visible", action="store_true", help="Show browser window")
+    parser.add_argument(
+        "--auth-url",
+        type=str,
+        help="Use an existing OAuth URL and only complete the browser flow",
+    )
+    parser.add_argument(
+        "--credentials-file",
+        type=str,
+        help="Override the credentials file path",
+    )
     args = parser.parse_args()
 
-    creds = load_credentials()
+    creds = load_credentials(args.credentials_file)
     accounts = creds.get("accounts", [])
     defaults = creds.get("defaults", {})
 
@@ -920,8 +1255,12 @@ def main():
         print("No enabled accounts to login.")
         return
 
+    if args.auth_url and len(targets) != 1:
+        print("[ERROR] --auth-url mode requires exactly one selected account")
+        sys.exit(1)
+
     headless = not args.visible
-    success, failed = cmd_login(targets, defaults, headless=headless)
+    success, failed = cmd_login(targets, defaults, headless=headless, auth_url=args.auth_url)
     sys.exit(0 if failed == 0 else 1)
 
 

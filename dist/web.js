@@ -3,11 +3,11 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { URL } from 'node:url';
-import { exec } from 'node:child_process';
+import { fileURLToPath, URL } from 'node:url';
+import { exec, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createAuthorizationFlow, loginAccount, refreshToken } from './auth.js';
-import { getCodexAuthPath, getCodexAuthStatus, syncCodexAuthFile, writeCodexAuthForAlias } from './codex-auth.js';
+import { getCodexAuthPath, getCodexAuthStatus, getCodexAuthSummary, resolveAliasForCurrentAuth, syncCodexAuthFile, writeCodexAuthForAlias } from './codex-auth.js';
 import { getStoreStatus, listAccounts, loadStore, removeAccount, updateAccount } from './store.js';
 import { getRefreshQueueState, startRefreshQueue, stopRefreshQueue } from './refresh-queue.js';
 import { getLogPath, logError, logInfo, readLogTail } from './logger.js';
@@ -20,17 +20,27 @@ const LOCALHOST_HOST_PATTERN = /^(127\.0\.0\.1|::1|localhost)$/i;
 const SYNC_INTERVAL_MS = 3000;
 const SYNC_DEBOUNCE_MS = 600;
 const ANTIGRAVITY_ACCOUNTS_FILE = path.join(os.homedir(), '.config', 'opencode', 'antigravity-accounts.json');
+const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
+const AUTO_LOGIN_TIMEOUT_MS = 6 * 60 * 1000;
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const AUTO_LOGIN_SCRIPT_ENV = 'OPENCODE_MULTI_AUTH_AUTO_LOGIN_SCRIPT';
+const AUTO_LOGIN_CREDENTIALS_ENV = 'OPENCODE_MULTI_AUTH_AUTO_LOGIN_CREDENTIALS_FILE';
+const AUTO_LOGIN_PYTHON_ENV = 'OPENCODE_MULTI_AUTH_AUTO_LOGIN_PYTHON';
+const DEFAULT_AUTO_LOGIN_CREDENTIALS_FILE = path.join(os.homedir(), '.config', 'opencode-multi-auth', 'credentials.json');
+const DEFAULT_AUTO_LOGIN_VENV_PYTHON = path.join(os.homedir(), '.config', 'opencode-multi-auth', '.venv', 'bin', 'python');
 export function isLocalhostHost(host) {
     return LOCALHOST_HOST_PATTERN.test(host.trim());
 }
 const execAsync = promisify(exec);
 let lastSyncAt = 0;
 let lastSyncError = null;
+let lastSyncAlias = null;
 let syncTimer = null;
 let pendingLogin = null;
 let lastLoginError = null;
 let antigravityQuotaState = { status: 'idle', scope: 'active' };
 let antigravityQuotaInFlight = null;
+let autoLoginChild = null;
 const HTML = `<!doctype html>
 <html lang="en">
   <head>
@@ -77,10 +87,30 @@ const HTML = `<!doctype html>
       header {
         padding: 28px 28px 10px;
         display: flex;
-        flex-direction: column;
+        justify-content: center;
+      }
+      .header-bar {
+        width: min(1320px, 100%);
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 18px;
+      }
+      .header-copy {
+        display: grid;
         gap: 6px;
-        align-items: center;
-        text-align: center;
+        text-align: left;
+      }
+      .header-kicker {
+        color: var(--accent-2);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+      }
+      .header-subtitle {
+        color: var(--muted);
+        max-width: 700px;
       }
       h1 {
         margin: 0;
@@ -143,6 +173,16 @@ const HTML = `<!doctype html>
         font-family: inherit;
         font-size: 14px;
       }
+      .add-row select {
+        flex: 1;
+        background: var(--panel-2);
+        border: 1px solid var(--border-soft);
+        border-radius: 12px;
+        padding: 12px 14px;
+        color: var(--text);
+        font-family: inherit;
+        font-size: 14px;
+      }
       .add-row input::placeholder {
         color: var(--muted);
       }
@@ -182,6 +222,13 @@ const HTML = `<!doctype html>
         border-color: var(--border-strong);
       }
       button:active { transform: translateY(1px); }
+      button:disabled,
+      input:disabled,
+      select:disabled,
+      textarea:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
       .filters {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -490,6 +537,86 @@ const HTML = `<!doctype html>
         display: none;
       }
       .toast.show { display: block; }
+      body.modal-open {
+        overflow: hidden;
+      }
+      .modal-shell {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: rgba(7, 11, 16, 0.72);
+        z-index: 50;
+      }
+      .modal-shell.open {
+        display: flex;
+      }
+      .modal-card {
+        width: min(560px, 100%);
+        background: linear-gradient(180deg, rgba(29, 35, 44, 0.98), rgba(23, 28, 35, 0.98));
+        border: 1px solid var(--border-strong);
+        border-radius: 22px;
+        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+        padding: 20px;
+      }
+      .modal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 14px;
+      }
+      .modal-kicker {
+        color: var(--accent-2);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+      }
+      .modal-header h2 {
+        margin: 6px 0 0;
+        font-size: 24px;
+        line-height: 1.15;
+      }
+      .modal-form {
+        display: grid;
+        gap: 12px;
+        margin-top: 16px;
+      }
+      .modal-field {
+        display: grid;
+        gap: 8px;
+      }
+      .modal-field span {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .modal-field input {
+        width: 100%;
+        background: var(--panel-2);
+        border: 1px solid var(--border-soft);
+        border-radius: 12px;
+        padding: 12px 14px;
+        color: var(--text);
+        font-family: inherit;
+        font-size: 14px;
+      }
+      .modal-status {
+        min-height: 52px;
+        padding: 12px 14px;
+        border: 1px solid var(--border-soft);
+        border-radius: 12px;
+        background: rgba(255,255,255,0.03);
+      }
+      .modal-status a {
+        color: var(--accent-2);
+      }
+      .modal-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 10px;
+      }
       .logs-header {
         display: flex;
         justify-content: space-between;
@@ -655,15 +782,25 @@ const HTML = `<!doctype html>
       }
       @media (max-width: 720px) {
         header { padding: 26px 18px 10px; }
+        .header-bar { flex-direction: column; align-items: stretch; }
         .container { padding: 0 16px 28px; }
         .actions { flex-direction: column; align-items: stretch; }
+        .modal-shell { padding: 16px; }
+        .modal-actions { flex-direction: column-reverse; }
         button { width: 100%; }
       }
     </style>
   </head>
   <body>
     <header>
-      <h1>Codex Token Dashboard</h1>
+      <div class="header-bar">
+        <div class="header-copy">
+          <div class="header-kicker">Codex Special Functions</div>
+          <h1>Codex Token Dashboard</h1>
+          <div class="header-subtitle">Add a new account from login + password, keep it in the local auto-login config, and watch the whole flow live.</div>
+        </div>
+        <button id="openAccountModalBtn">Add Codex account</button>
+      </div>
     </header>
     <div class="container">
       <section class="panel">
@@ -679,6 +816,12 @@ const HTML = `<!doctype html>
         <div class="add-row">
           <input id="addAliasInput" placeholder="New account alias (e.g., acc8)" />
           <button class="secondary" id="addAccountBtn">Add account</button>
+        </div>
+        <div class="add-row">
+          <select id="autoLoginSelect">
+            <option value="">Auto-login account...</option>
+          </select>
+          <button class="secondary" id="autoLoginBtn">Auto add</button>
         </div>
         <div class="queue" id="queue"></div>
         <div class="notice" id="notice"></div>
@@ -768,6 +911,40 @@ const HTML = `<!doctype html>
         <pre class="log-box" id="logBox"></pre>
       </section>
     </div>
+    <div class="modal-shell" id="createAccountModal" aria-hidden="true">
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="createAccountTitle">
+        <div class="modal-header">
+          <div>
+            <div class="modal-kicker">Codex Login</div>
+            <h2 id="createAccountTitle">Add account from login + password</h2>
+          </div>
+          <button class="ghost small" id="closeAccountModalBtn" type="button">Close</button>
+        </div>
+        <form class="modal-form" id="createAccountForm">
+          <label class="modal-field">
+            <span>Login / email</span>
+            <input id="createAccountEmail" type="text" autocomplete="username" placeholder="name@outlook.com" />
+          </label>
+          <label class="modal-field">
+            <span>Password</span>
+            <input id="createAccountPassword" type="password" autocomplete="current-password" placeholder="Outlook password" />
+          </label>
+          <label class="modal-field">
+            <span>Alias (optional)</span>
+            <input id="createAccountAlias" type="text" placeholder="gloriamejiah9fr971" />
+          </label>
+          <label class="modal-field">
+            <span>ChatGPT password (optional)</span>
+            <input id="createAccountChatgptPassword" type="password" placeholder="Uses saved default or main password if left empty" />
+          </label>
+          <div class="modal-status notice" id="createAccountStatus">Stored locally in the auto-login config, then the add flow starts immediately.</div>
+          <div class="modal-actions">
+            <button class="secondary" id="cancelAccountModalBtn" type="button">Cancel</button>
+            <button id="submitAccountModalBtn" type="submit">Add and log in</button>
+          </div>
+        </form>
+      </div>
+    </div>
     <div class="toast" id="toast"></div>
     <script>
       const metaEl = document.getElementById('meta')
@@ -787,8 +964,21 @@ const HTML = `<!doctype html>
       const logBox = document.getElementById('logBox')
       const refreshLogsBtn = document.getElementById('refreshLogsBtn')
       const logPathEl = document.getElementById('logPath')
+      const openAccountModalBtn = document.getElementById('openAccountModalBtn')
       const addAliasInput = document.getElementById('addAliasInput')
       const addAccountBtn = document.getElementById('addAccountBtn')
+      const autoLoginSelect = document.getElementById('autoLoginSelect')
+      const autoLoginBtn = document.getElementById('autoLoginBtn')
+      const createAccountModal = document.getElementById('createAccountModal')
+      const closeAccountModalBtn = document.getElementById('closeAccountModalBtn')
+      const cancelAccountModalBtn = document.getElementById('cancelAccountModalBtn')
+      const createAccountForm = document.getElementById('createAccountForm')
+      const createAccountEmail = document.getElementById('createAccountEmail')
+      const createAccountPassword = document.getElementById('createAccountPassword')
+      const createAccountAlias = document.getElementById('createAccountAlias')
+      const createAccountChatgptPassword = document.getElementById('createAccountChatgptPassword')
+      const createAccountStatus = document.getElementById('createAccountStatus')
+      const submitAccountModalBtn = document.getElementById('submitAccountModalBtn')
       const agPathEl = document.getElementById('antigravityPath')
       const agNoticeEl = document.getElementById('antigravityNotice')
       const agAccountsEl = document.getElementById('antigravityAccounts')
@@ -816,6 +1006,9 @@ const HTML = `<!doctype html>
 
       let latestState = null
       let pollTimer = null
+      let pollIntervalMs = 0
+      let createAccountModalOpen = false
+      let createAccountTrackedEmail = ''
       const rotationStrategyHelp = {
         'round-robin': 'Cycle through enabled accounts in order.',
         'least-used': 'Prefer the enabled account with the lowest usage count.',
@@ -829,6 +1022,17 @@ const HTML = `<!doctype html>
         toast.textContent = text
         toast.classList.add('show')
         setTimeout(() => toast.classList.remove('show'), 2200)
+      }
+
+      function setCreateAccountModalOpen(open) {
+        createAccountModalOpen = Boolean(open)
+        if (!createAccountModal) return
+        createAccountModal.classList.toggle('open', createAccountModalOpen)
+        createAccountModal.setAttribute('aria-hidden', createAccountModalOpen ? 'false' : 'true')
+        document.body.classList.toggle('modal-open', createAccountModalOpen)
+        if (createAccountModalOpen && createAccountEmail && !latestState?.login) {
+          createAccountEmail.focus()
+        }
       }
 
       function describeRotationStrategy(strategy) {
@@ -1090,7 +1294,7 @@ const HTML = `<!doctype html>
       function renderAccounts(state) {
         const filtered = sortAccounts(applyFilters(state.accounts), state)
         const cards = filtered.map((acc) => {
-          const active = acc.alias === state.currentAlias
+          const active = acc.alias === state.deviceAlias
           const recommended = acc.alias === state.recommendedAlias
           const badge = active ? 'On device' : 'Stored'
           const badgeClass = active ? 'badge' : 'badge inactive'
@@ -1173,14 +1377,17 @@ const HTML = `<!doctype html>
         const storeLine = storeStatus.encrypted
           ? storeStatus.locked ? 'Encrypted (locked)' : 'Encrypted'
           : 'Plain'
+        const autoLoginLine = state.autoLogin?.configured
+          ? state.autoLogin.accounts.length + ' configured'
+          : (state.autoLogin?.error || 'not configured')
         metaEl.innerHTML = \`
           <div class="meta-item">
             <span>Accounts</span>
             <strong>\${state.accounts.length}</strong>
           </div>
           <div class="meta-item">
-            <span>Current token</span>
-            <strong>\${state.currentAlias || 'none'}</strong>
+            <span>On device</span>
+            <strong>\${state.deviceAlias || 'none'}</strong>
           </div>
           <div class="meta-item">
             <span>Recommended token</span>
@@ -1191,6 +1398,10 @@ const HTML = `<!doctype html>
             <strong style="font-size: 13px;">\${state.authPath}</strong>
           </div>
           <div class="meta-item">
+            <span>auth.json email</span>
+            <strong style="font-size: 13px;">\${state.authSummary?.email || 'unknown'}</strong>
+          </div>
+          <div class="meta-item">
             <span>Store</span>
             <strong>\${storeLine}</strong>
           </div>
@@ -1198,16 +1409,42 @@ const HTML = `<!doctype html>
             <span>Last sync</span>
             <strong>\${state.lastSyncAt ? formatDate(state.lastSyncAt) : 'never'}</strong>
           </div>
+          <div class="meta-item">
+            <span>Last synced alias</span>
+            <strong>\${state.lastSyncAlias || 'none'}</strong>
+          </div>
+          <div class="meta-item">
+            <span>Auto-login</span>
+            <strong style="font-size: 13px;">\${escapeHtml(autoLoginLine)}</strong>
+          </div>
         \`
         notice.textContent = state.lastSyncError || storeStatus.error || ''
       }
 
       function renderLogin(state) {
         if (!loginNotice) return
-        if (state.login && state.login.url) {
+        if (state.login) {
+          const modeLabel = state.login.mode === 'auto' ? 'Auto-login' : 'Login'
           const alias = escapeHtml(state.login.alias || 'account')
-          const url = escapeHtml(state.login.url)
-          loginNotice.innerHTML = 'Login in progress for <strong>' + alias + '</strong> — <a href="' + url + '" target="_blank" rel="noreferrer">Open login</a>'
+          const url = state.login.url ? escapeHtml(state.login.url) : ''
+          const emailLine = state.login.email
+            ? '<div class="notice">Email: ' + escapeHtml(state.login.email) + '</div>'
+            : ''
+          const stepLine = state.login.step
+            ? '<div class="notice">Status: ' + escapeHtml(state.login.step) + '</div>'
+            : ''
+          const logs = Array.isArray(state.login.output) && state.login.output.length
+            ? '<div class="notice">Recent: ' + state.login.output.map((line) => escapeHtml(line)).join(' · ') + '</div>'
+            : ''
+          const manualLink = url
+            ? '<a href="' + url + '" target="_blank" rel="noreferrer">Open login manually</a>'
+            : ''
+          loginNotice.innerHTML =
+            modeLabel + ' in progress for <strong>' + alias + '</strong>' +
+            (manualLink ? ' — ' + manualLink : '') +
+            emailLine +
+            stepLine +
+            logs
           return
         }
         if (state.lastLoginError) {
@@ -1215,6 +1452,99 @@ const HTML = `<!doctype html>
           return
         }
         loginNotice.textContent = ''
+      }
+
+      function renderAutoLoginControls(state) {
+        const config = state.autoLogin || { accounts: [], configured: false, error: 'not configured' }
+        const accounts = Array.isArray(config.accounts) ? config.accounts : []
+        const enabledAccounts = accounts.filter((account) => account.enabled !== false)
+        const selectedValue = autoLoginSelect ? autoLoginSelect.value : ''
+
+        if (autoLoginSelect) {
+          const options = ['<option value="">Auto-login account...</option>']
+          if (enabledAccounts.length > 0) {
+            for (const account of enabledAccounts) {
+              const label = escapeHtml(account.alias + ' - ' + account.email)
+              const selected = selectedValue === account.email ? ' selected' : ''
+              options.push('<option value="' + escapeHtml(account.email) + '"' + selected + '>' + label + '</option>')
+            }
+          } else {
+            options.push('<option value="" disabled>' + escapeHtml(config.error || 'No enabled credentials') + '</option>')
+          }
+          autoLoginSelect.innerHTML = options.join('')
+          if (selectedValue && enabledAccounts.some((account) => account.email === selectedValue)) {
+            autoLoginSelect.value = selectedValue
+          }
+          autoLoginSelect.disabled = !config.configured || Boolean(state.login)
+          autoLoginSelect.title = config.path ? ('Credentials: ' + config.path) : ''
+        }
+
+        if (autoLoginBtn) {
+          autoLoginBtn.disabled = !config.configured || enabledAccounts.length === 0 || Boolean(state.login)
+          autoLoginBtn.textContent = state.login?.mode === 'auto' ? 'Auto add running...' : 'Auto add'
+          autoLoginBtn.title = config.error || ''
+        }
+
+        if (addAccountBtn) {
+          addAccountBtn.disabled = Boolean(state.login)
+        }
+        if (addAliasInput) {
+          addAliasInput.disabled = Boolean(state.login)
+        }
+      }
+
+      function renderCreateAccountModal(state) {
+        const busy = Boolean(state.login)
+        if (openAccountModalBtn) {
+          openAccountModalBtn.disabled = busy
+        }
+        if (createAccountEmail) {
+          createAccountEmail.disabled = busy
+        }
+        if (createAccountPassword) {
+          createAccountPassword.disabled = busy
+        }
+        if (createAccountAlias) {
+          createAccountAlias.disabled = busy
+        }
+        if (createAccountChatgptPassword) {
+          createAccountChatgptPassword.disabled = busy
+        }
+        if (submitAccountModalBtn) {
+          submitAccountModalBtn.disabled = busy
+          submitAccountModalBtn.textContent = busy ? 'Adding...' : 'Add and log in'
+        }
+        if (!createAccountStatus) return
+
+        if (state.login) {
+          const lines = []
+          if (state.login.email) {
+            lines.push('<div class="notice">Email: ' + escapeHtml(state.login.email) + '</div>')
+          }
+          if (state.login.step) {
+            lines.push('<div class="notice">Status: ' + escapeHtml(state.login.step) + '</div>')
+          }
+          if (Array.isArray(state.login.output) && state.login.output.length) {
+            lines.push('<div class="notice">Recent: ' + state.login.output.map((line) => escapeHtml(line)).join(' · ') + '</div>')
+          }
+          if (state.login.url) {
+            lines.push('<div class="notice"><a href="' + escapeHtml(state.login.url) + '" target="_blank" rel="noreferrer">Open login manually</a></div>')
+          }
+          createAccountStatus.innerHTML = lines.join('')
+          return
+        }
+
+        if (state.lastLoginError && createAccountTrackedEmail) {
+          createAccountStatus.textContent = 'Add failed: ' + state.lastLoginError
+          return
+        }
+
+        if (createAccountTrackedEmail) {
+          createAccountStatus.textContent = 'Account saved locally. If the browser asks for verification, complete it there and the dashboard will keep tracking progress.'
+          return
+        }
+
+        createAccountStatus.textContent = 'Stored locally in the auto-login config, then the add flow starts immediately.'
       }
 
       function renderQueue(state) {
@@ -1226,10 +1556,11 @@ const HTML = `<!doctype html>
         }
         const percent = queue.total ? Math.round((queue.completed / queue.total) * 100) : 0
         const statusLabel = queue.running ? 'Running' : queue.stopped ? 'Stopped' : 'Idle'
+        const activeAliases = Array.isArray(queue.currentAliases) ? queue.currentAliases : []
         queueEl.innerHTML = \`
-          <div class="notice">Queue: \${statusLabel} · \${queue.completed}/\${queue.total} · Errors: \${queue.errors}</div>
+          <div class="notice">Queue: \${statusLabel} · \${queue.completed}/\${queue.total} · Errors: \${queue.errors} · Parallel: \${queue.active || 0}/\${queue.concurrency || 0}</div>
           <div class="progress-bar"><div class="progress-fill" style="width: \${percent}%"></div></div>
-          <div class="notice">Current: \${queue.currentAlias || 'none'}</div>
+          <div class="notice">Current: \${activeAliases.length > 0 ? escapeHtml(activeAliases.join(', ')) : 'none'}</div>
           \${queue.running ? '<button class="danger small" id="stopQueueBtn">Stop refresh</button>' : ''}
         \`
         const stopBtn = document.getElementById('stopQueueBtn')
@@ -1382,13 +1713,17 @@ const HTML = `<!doctype html>
       }
 
       function updatePolling(queue) {
-        if (queue?.running && !pollTimer) {
-          pollTimer = setInterval(() => refreshState(), 2000)
-        }
-        if (!queue?.running && pollTimer) {
+        const nextInterval = queue?.running || latestState?.login ? 2000 : 5000
+        if (pollTimer && pollIntervalMs === nextInterval) return
+        if (pollTimer) {
           clearInterval(pollTimer)
           pollTimer = null
         }
+        pollIntervalMs = nextInterval
+        pollTimer = setInterval(() => {
+          if (document.hidden) return
+          refreshState().catch(() => {})
+        }, nextInterval)
       }
 
       async function refreshLogs() {
@@ -1404,6 +1739,8 @@ const HTML = `<!doctype html>
         renderQueue(state)
         renderAccounts(state)
         renderLogin(state)
+        renderAutoLoginControls(state)
+        renderCreateAccountModal(state)
         renderAntigravity(state)
         updatePolling(state.queue)
         await renderForceMode()
@@ -1645,6 +1982,84 @@ const HTML = `<!doctype html>
         })
       }
 
+      if (openAccountModalBtn) {
+        openAccountModalBtn.addEventListener('click', () => {
+          if (!latestState?.login && !latestState?.lastLoginError) {
+            createAccountTrackedEmail = ''
+          }
+          setCreateAccountModalOpen(true)
+        })
+      }
+
+      if (closeAccountModalBtn) {
+        closeAccountModalBtn.addEventListener('click', () => {
+          setCreateAccountModalOpen(false)
+        })
+      }
+
+      if (cancelAccountModalBtn) {
+        cancelAccountModalBtn.addEventListener('click', () => {
+          setCreateAccountModalOpen(false)
+        })
+      }
+
+      if (createAccountModal) {
+        createAccountModal.addEventListener('click', (event) => {
+          if (event.target === createAccountModal) {
+            setCreateAccountModalOpen(false)
+          }
+        })
+      }
+
+      document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && createAccountModalOpen) {
+          setCreateAccountModalOpen(false)
+        }
+      })
+
+      if (createAccountForm && createAccountEmail && createAccountPassword) {
+        createAccountForm.addEventListener('submit', async (event) => {
+          event.preventDefault()
+          const email = createAccountEmail.value.trim()
+          const password = createAccountPassword.value
+          const alias = createAccountAlias ? createAccountAlias.value.trim() : ''
+          const chatgptPassword = createAccountChatgptPassword ? createAccountChatgptPassword.value : ''
+
+          if (!email || !password.trim()) {
+            showToast('Fill login and password')
+            return
+          }
+
+          try {
+            await api('/api/auto-login/add', {
+              method: 'POST',
+              body: JSON.stringify({
+                email,
+                password,
+                alias,
+                chatgptPassword
+              })
+            })
+            createAccountTrackedEmail = email
+            if (createAccountPassword) {
+              createAccountPassword.value = ''
+            }
+            if (createAccountChatgptPassword) {
+              createAccountChatgptPassword.value = ''
+            }
+            showToast('Account add started')
+            await refreshState()
+          } catch (err) {
+            const message = err && typeof err === 'object' && 'message' in err ? String(err.message) : String(err)
+            if (createAccountStatus) {
+              createAccountStatus.textContent = 'Add failed: ' + message
+            }
+            showToast('Add failed')
+            await refreshState()
+          }
+        })
+      }
+
       if (addAccountBtn && addAliasInput) {
         const startLogin = async () => {
           const raw = addAliasInput.value.trim()
@@ -1655,11 +2070,11 @@ const HTML = `<!doctype html>
               body: JSON.stringify({ alias })
             })
             addAliasInput.value = alias
-            if (result?.url && loginNotice) {
-              const url = escapeHtml(result.url)
-              loginNotice.innerHTML = 'Login in progress for <strong>' + escapeHtml(alias) + '</strong> — <a href="' + url + '" target="_blank" rel="noreferrer">Open login</a>'
-            }
             showToast('Open login URL')
+            if (result?.url) {
+              window.open(result.url, '_blank')
+            }
+            await refreshState()
           } catch (err) {
             showToast('Login start failed')
           }
@@ -1667,6 +2082,31 @@ const HTML = `<!doctype html>
         addAccountBtn.addEventListener('click', startLogin)
         addAliasInput.addEventListener('keydown', (event) => {
           if (event.key === 'Enter') startLogin()
+        })
+      }
+
+      if (autoLoginBtn && autoLoginSelect) {
+        const startAutoLogin = async () => {
+          const selector = autoLoginSelect.value
+          if (!selector) {
+            showToast('Select auto-login account')
+            return
+          }
+          try {
+            await api('/api/auto-login/start', {
+              method: 'POST',
+              body: JSON.stringify({ selector })
+            })
+            showToast('Auto-login started')
+            await refreshState()
+          } catch (err) {
+            showToast('Auto-login start failed')
+            await refreshState()
+          }
+        }
+        autoLoginBtn.addEventListener('click', startAutoLogin)
+        autoLoginSelect.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') startAutoLogin()
         })
       }
 
@@ -1814,6 +2254,10 @@ const HTML = `<!doctype html>
         console.error(err)
         notice.textContent = 'Failed to load state.'
       })
+      updatePolling({ running: false })
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) refreshState().catch(() => {})
+      })
       refreshLogs().catch(() => {
         logBox.textContent = 'No logs yet.'
       })
@@ -1892,12 +2336,380 @@ function recommendAlias(accounts) {
     }
     return best?.alias ?? null;
 }
+function getAutoLoginScriptPath() {
+    const override = process.env[AUTO_LOGIN_SCRIPT_ENV];
+    if (override && override.trim())
+        return path.resolve(override.trim());
+    return path.resolve(MODULE_DIR, '..', 'auto-login', 'auto_login.py');
+}
+function getAutoLoginCredentialsPath() {
+    const override = process.env[AUTO_LOGIN_CREDENTIALS_ENV];
+    if (override && override.trim())
+        return path.resolve(override.trim());
+    return DEFAULT_AUTO_LOGIN_CREDENTIALS_FILE;
+}
+function getAutoLoginPythonPath() {
+    const override = process.env[AUTO_LOGIN_PYTHON_ENV];
+    if (override && override.trim())
+        return path.resolve(override.trim());
+    if (fs.existsSync(DEFAULT_AUTO_LOGIN_VENV_PYTHON)) {
+        return DEFAULT_AUTO_LOGIN_VENV_PYTHON;
+    }
+    return 'python3';
+}
+function sanitizeAliasSeed(value) {
+    const cleaned = value
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9._-]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+    return cleaned || 'account';
+}
+function ensureAutoLoginCredentialsDir(credentialsPath) {
+    const dir = path.dirname(credentialsPath);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try {
+        fs.chmodSync(dir, 0o700);
+    }
+    catch {
+        // Best effort on non-POSIX environments.
+    }
+}
+function readAutoLoginCredentialsFile(credentialsPath = getAutoLoginCredentialsPath()) {
+    if (!fs.existsSync(credentialsPath)) {
+        return { accounts: [] };
+    }
+    const parsed = JSON.parse(fs.readFileSync(credentialsPath, 'utf-8'));
+    return {
+        defaults: parsed && typeof parsed.defaults === 'object' ? parsed.defaults : undefined,
+        accounts: Array.isArray(parsed?.accounts) ? parsed.accounts : []
+    };
+}
+function writeAutoLoginCredentialsFile(credentialsPath, data) {
+    ensureAutoLoginCredentialsDir(credentialsPath);
+    fs.writeFileSync(credentialsPath, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
+    try {
+        fs.chmodSync(credentialsPath, 0o600);
+    }
+    catch {
+        // Best effort on non-POSIX environments.
+    }
+}
+function upsertAutoLoginCredentials(input) {
+    const email = input.email.trim();
+    if (!email) {
+        throw new Error('Missing login/email');
+    }
+    const password = input.password.trim();
+    if (!password) {
+        throw new Error('Missing password');
+    }
+    const scriptPath = getAutoLoginScriptPath();
+    if (!fs.existsSync(scriptPath)) {
+        throw new Error('auto_login.py not found');
+    }
+    const credentialsPath = getAutoLoginCredentialsPath();
+    const file = readAutoLoginCredentialsFile(credentialsPath);
+    const accounts = Array.isArray(file.accounts) ? [...file.accounts] : [];
+    const existingIndex = accounts.findIndex((entry) => typeof entry.email === 'string' && entry.email.toLowerCase() === email.toLowerCase());
+    const existing = existingIndex >= 0 ? accounts[existingIndex] : undefined;
+    const aliasSource = input.alias?.trim() ||
+        existing?.alias?.trim() ||
+        existing?.id?.trim() ||
+        email.split('@')[0] ||
+        email;
+    const alias = sanitizeAliasSeed(aliasSource);
+    const chatgptPassword = input.chatgptPassword?.trim() ||
+        existing?.chatgpt_password?.trim() ||
+        file.defaults?.chatgpt_password?.trim() ||
+        password;
+    const nextAccount = {
+        ...existing,
+        id: existing?.id || alias,
+        alias,
+        email,
+        outlook_password: password,
+        chatgpt_password: chatgptPassword,
+        enabled: true
+    };
+    if (existingIndex >= 0) {
+        accounts[existingIndex] = nextAccount;
+    }
+    else {
+        accounts.push(nextAccount);
+    }
+    writeAutoLoginCredentialsFile(credentialsPath, {
+        ...file,
+        accounts
+    });
+    return {
+        alias,
+        email,
+        enabled: true
+    };
+}
+function loadAutoLoginConfig() {
+    const pathValue = getAutoLoginCredentialsPath();
+    const scriptPath = getAutoLoginScriptPath();
+    const result = {
+        path: pathValue,
+        scriptPath,
+        pythonPath: getAutoLoginPythonPath(),
+        configured: false,
+        accounts: []
+    };
+    if (!fs.existsSync(scriptPath)) {
+        return { ...result, error: 'auto_login.py not found' };
+    }
+    if (!fs.existsSync(pathValue)) {
+        return { ...result, error: 'credentials.json not found' };
+    }
+    try {
+        const parsed = JSON.parse(fs.readFileSync(pathValue, 'utf-8'));
+        const accounts = Array.isArray(parsed?.accounts) ? parsed.accounts : [];
+        const view = accounts
+            .map((entry) => {
+            const email = typeof entry.email === 'string' ? entry.email.trim() : '';
+            if (!email)
+                return null;
+            const aliasSource = (typeof entry.alias === 'string' && entry.alias.trim()) ||
+                (typeof entry.id === 'string' && entry.id.trim()) ||
+                email.split('@')[0];
+            return {
+                alias: sanitizeAliasSeed(aliasSource),
+                email,
+                enabled: entry.enabled !== false
+            };
+        })
+            .filter((entry) => Boolean(entry))
+            .sort((a, b) => a.email.localeCompare(b.email));
+        if (view.length === 0) {
+            return { ...result, error: 'No accounts in credentials.json' };
+        }
+        return {
+            ...result,
+            configured: true,
+            accounts: view
+        };
+    }
+    catch (err) {
+        return { ...result, error: `Failed to parse credentials.json: ${err}` };
+    }
+}
+function findAutoLoginAccount(config, selector) {
+    const normalized = selector.trim().toLowerCase();
+    if (!normalized)
+        return null;
+    return config.accounts.find((account) => account.email.toLowerCase() === normalized || account.alias.toLowerCase() === normalized) || null;
+}
+function resolveAutoLoginAlias(store, account) {
+    const existing = Object.values(store.accounts).find((entry) => typeof entry.email === 'string' && entry.email.toLowerCase() === account.email.toLowerCase());
+    if (existing) {
+        return existing.alias;
+    }
+    const base = sanitizeAliasSeed(account.alias || account.email.split('@')[0]);
+    let candidate = base;
+    let index = 1;
+    while (store.accounts[candidate]) {
+        candidate = `${base}-${index}`;
+        index += 1;
+    }
+    return candidate;
+}
+function setPendingLogin(state) {
+    pendingLogin = state;
+}
+function updatePendingLogin(patch) {
+    if (!pendingLogin)
+        return;
+    pendingLogin = {
+        ...pendingLogin,
+        ...patch,
+        output: patch.output ?? pendingLogin.output
+    };
+}
+function appendPendingLoginOutput(line) {
+    const normalized = line
+        .replace(/\x1b\[[0-9;]*m/g, '')
+        .trim();
+    if (!normalized || !pendingLogin)
+        return;
+    const output = [...pendingLogin.output, normalized].slice(-6);
+    updatePendingLogin({
+        output,
+        step: normalized,
+        status: normalized.toLowerCase().includes('callback') ? 'waiting-callback' : 'running'
+    });
+}
+function stopAutoLoginChild() {
+    if (autoLoginChild && !autoLoginChild.killed) {
+        autoLoginChild.kill('SIGTERM');
+    }
+    autoLoginChild = null;
+}
+function consumeProcessLines(stream, onLine) {
+    if (!stream)
+        return;
+    let buffered = '';
+    stream.setEncoding('utf8');
+    stream.on('data', (chunk) => {
+        buffered += chunk;
+        let newlineIndex = buffered.indexOf('\n');
+        while (newlineIndex >= 0) {
+            const line = buffered.slice(0, newlineIndex).trim();
+            buffered = buffered.slice(newlineIndex + 1);
+            if (line)
+                onLine(line);
+            newlineIndex = buffered.indexOf('\n');
+        }
+    });
+    stream.on('end', () => {
+        const line = buffered.trim();
+        if (line)
+            onLine(line);
+    });
+}
+function startManualLogin(alias) {
+    if (pendingLogin) {
+        throw new Error(`Login already in progress for ${pendingLogin.alias}`);
+    }
+    return createAuthorizationFlow().then((flow) => {
+        setPendingLogin({
+            alias,
+            startedAt: Date.now(),
+            url: flow.url,
+            mode: 'manual',
+            status: 'running',
+            step: 'Waiting for browser login...',
+            output: []
+        });
+        lastLoginError = null;
+        loginAccount(alias, flow, { timeoutMs: LOGIN_TIMEOUT_MS })
+            .then(() => {
+            logInfo(`Login completed for ${alias}`);
+            setPendingLogin(null);
+        })
+            .catch((err) => {
+            lastLoginError = String(err);
+            logError(`Login failed for ${alias}: ${err}`);
+            setPendingLogin(null);
+        });
+        return { ok: true, url: flow.url };
+    });
+}
+async function startAutoLogin(selector, visible = false) {
+    if (pendingLogin) {
+        throw new Error(`Login already in progress for ${pendingLogin.alias}`);
+    }
+    const config = loadAutoLoginConfig();
+    if (!config.configured) {
+        throw new Error(config.error || 'Auto-login is not configured');
+    }
+    const selected = findAutoLoginAccount(config, selector);
+    if (!selected) {
+        throw new Error('Unknown auto-login account');
+    }
+    if (!selected.enabled) {
+        throw new Error('Selected auto-login account is disabled');
+    }
+    const store = loadStore();
+    const alias = resolveAutoLoginAlias(store, selected);
+    const flow = await createAuthorizationFlow();
+    setPendingLogin({
+        alias,
+        email: selected.email,
+        startedAt: Date.now(),
+        url: flow.url,
+        mode: 'auto',
+        status: 'starting',
+        step: 'Launching browser automation (a Chrome window may open)...',
+        output: []
+    });
+    lastLoginError = null;
+    let loginSettled = false;
+    const loginPromise = loginAccount(alias, flow, { timeoutMs: AUTO_LOGIN_TIMEOUT_MS })
+        .then(() => {
+        loginSettled = true;
+        stopAutoLoginChild();
+        logInfo(`Auto-login completed for ${alias} (${selected.email})`);
+        setPendingLogin(null);
+    })
+        .catch((err) => {
+        loginSettled = true;
+        stopAutoLoginChild();
+        lastLoginError = String(err);
+        logError(`Auto-login failed for ${alias} (${selected.email}): ${err}`);
+        setPendingLogin(null);
+    });
+    autoLoginChild = spawn(config.pythonPath, [
+        '-u',
+        config.scriptPath,
+        '--email',
+        selected.email,
+        '--auth-url',
+        flow.url,
+        '--credentials-file',
+        config.path,
+        ...(visible ? ['--visible'] : [])
+    ], {
+        stdio: ['ignore', 'pipe', 'pipe']
+    });
+    updatePendingLogin({
+        pid: autoLoginChild.pid ?? undefined,
+        status: 'running'
+    });
+    consumeProcessLines(autoLoginChild.stdout, (line) => {
+        appendPendingLoginOutput(line);
+    });
+    consumeProcessLines(autoLoginChild.stderr, (line) => {
+        appendPendingLoginOutput(`[stderr] ${line}`);
+    });
+    autoLoginChild.on('error', (err) => {
+        appendPendingLoginOutput(`Process error: ${err.message}`);
+    });
+    autoLoginChild.on('exit', (code, signal) => {
+        if (!pendingLogin || pendingLogin.mode !== 'auto' || pendingLogin.alias !== alias) {
+            autoLoginChild = null;
+            return;
+        }
+        autoLoginChild = null;
+        if (loginSettled) {
+            return;
+        }
+        if (code === 0) {
+            updatePendingLogin({
+                status: 'waiting-callback',
+                step: 'Browser automation finished. Waiting for local callback...'
+            });
+            return;
+        }
+        const reason = signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`;
+        appendPendingLoginOutput(`Browser automation exited with ${reason}.`);
+        lastLoginError = `Auto-login browser automation exited with ${reason}`;
+        updatePendingLogin({
+            status: 'waiting-callback',
+            step: 'Browser automation stopped before callback. Complete login manually or wait for timeout.'
+        });
+    });
+    void loginPromise;
+    return {
+        ok: true,
+        alias,
+        email: selected.email,
+        url: flow.url
+    };
+}
+async function saveAutoLoginAccountAndStart(input) {
+    const account = upsertAutoLoginCredentials(input);
+    return startAutoLogin(account.email);
+}
 function runSync() {
     try {
         const result = syncCodexAuthFile();
         const authStatus = getCodexAuthStatus();
         lastSyncAt = Date.now();
         lastSyncError = authStatus.error;
+        lastSyncAlias = result.alias ?? null;
         if (result.updated || result.added) {
             logInfo(`Synced auth.json (${result.alias ?? 'none'})`);
         }
@@ -2291,6 +3103,8 @@ export function startWebConsole(options) {
                 const store = loadStore();
                 const rawAccounts = Object.values(store.accounts);
                 const accounts = rawAccounts.map(scrubAccount);
+                const deviceAlias = resolveAliasForCurrentAuth(store);
+                const authSummary = getCodexAuthSummary();
                 const storeStatus = getStoreStatus();
                 // Phase G: Only load antigravity if feature is enabled
                 const settings = getSettings();
@@ -2299,12 +3113,16 @@ export function startWebConsole(options) {
                 const antigravity = antigravityEnabled ? loadAntigravityAccounts() : { accounts: [], path: ANTIGRAVITY_ACCOUNTS_FILE };
                 const forceState = getForceState();
                 const forceActive = isForceActive();
+                const autoLogin = loadAutoLoginConfig();
                 sendJson(res, 200, {
                     authPath: getCodexAuthPath(),
-                    currentAlias: store.activeAlias,
+                    deviceAlias,
+                    rotationAlias: store.activeAlias,
                     accounts,
                     lastSyncAt,
                     lastSyncError,
+                    lastSyncAlias,
+                    authSummary,
                     storeStatus,
                     login: pendingLogin,
                     lastLoginError,
@@ -2313,6 +3131,7 @@ export function startWebConsole(options) {
                     queue: getRefreshQueueState(),
                     recommendedAlias: recommendAlias(rawAccounts),
                     logPath: getLogPath(),
+                    autoLogin,
                     rotationStrategy: runtimeSettings.settings.rotationStrategy,
                     force: {
                         active: forceActive,
@@ -2356,20 +3175,54 @@ export function startWebConsole(options) {
                     return;
                 }
                 try {
-                    const flow = await createAuthorizationFlow();
-                    pendingLogin = { alias, startedAt: Date.now(), url: flow.url };
-                    lastLoginError = null;
-                    loginAccount(alias, flow)
-                        .then(() => {
-                        logInfo(`Login completed for ${alias}`);
-                        pendingLogin = null;
-                    })
-                        .catch((err) => {
-                        lastLoginError = String(err);
-                        logError(`Login failed for ${alias}: ${err}`);
-                        pendingLogin = null;
+                    const result = await startManualLogin(alias);
+                    sendJson(res, 200, result);
+                }
+                catch (err) {
+                    lastLoginError = String(err);
+                    sendJson(res, 500, { error: String(err) });
+                }
+                return;
+            }
+            if (req.method === 'POST' && path === '/api/auto-login/start') {
+                const body = await readJsonBody(req);
+                const selector = typeof body.selector === 'string' ? body.selector.trim() : '';
+                if (!selector) {
+                    sendJson(res, 400, { error: 'Missing selector' });
+                    return;
+                }
+                try {
+                    const result = await startAutoLogin(selector, body.visible === true);
+                    sendJson(res, 200, result);
+                }
+                catch (err) {
+                    lastLoginError = String(err);
+                    sendJson(res, 500, { error: String(err) });
+                }
+                return;
+            }
+            if (req.method === 'POST' && path === '/api/auto-login/add') {
+                const body = await readJsonBody(req);
+                const email = typeof body.email === 'string' ? body.email.trim() : '';
+                const password = typeof body.password === 'string' ? body.password : '';
+                const alias = typeof body.alias === 'string' ? body.alias.trim() : '';
+                const chatgptPassword = typeof body.chatgptPassword === 'string' ? body.chatgptPassword : '';
+                if (!email) {
+                    sendJson(res, 400, { error: 'Missing login/email' });
+                    return;
+                }
+                if (!password.trim()) {
+                    sendJson(res, 400, { error: 'Missing password' });
+                    return;
+                }
+                try {
+                    const result = await saveAutoLoginAccountAndStart({
+                        email,
+                        password,
+                        alias,
+                        chatgptPassword
                     });
-                    sendJson(res, 200, { ok: true, url: flow.url });
+                    sendJson(res, 200, result);
                 }
                 catch (err) {
                     lastLoginError = String(err);
@@ -2433,6 +3286,7 @@ export function startWebConsole(options) {
                     sendJson(res, 400, { error: 'Unknown alias' });
                     return;
                 }
+                const deviceAlias = resolveAliasForCurrentAuth(store);
                 const results = [];
                 for (const account of targets) {
                     if (!account.refreshToken) {
@@ -2444,7 +3298,7 @@ export function startWebConsole(options) {
                         results.push({ alias: account.alias, updated: false, error: 'Token refresh failed' });
                         continue;
                     }
-                    if (store.activeAlias === account.alias && refreshed.idToken) {
+                    if (deviceAlias === account.alias) {
                         try {
                             writeCodexAuthForAlias(account.alias);
                         }
@@ -2460,7 +3314,7 @@ export function startWebConsole(options) {
             }
             if (req.method === 'POST' && path === '/api/limits/refresh') {
                 const body = await readJsonBody(req);
-                const accounts = listAccounts().filter((acc) => acc.idToken);
+                const accounts = listAccounts().filter((acc) => acc.refreshToken && acc.accessToken);
                 if (body.alias && !accounts.find((acc) => acc.alias === body.alias)) {
                     sendJson(res, 400, { error: 'Unknown alias' });
                     return;
@@ -2608,10 +3462,14 @@ export function startWebConsole(options) {
                 // Phase D: Only targeted alias credentials mutate
                 // Start OAuth flow for the specific alias
                 try {
+                    if (pendingLogin) {
+                        sendJson(res, 409, { error: `Login already in progress for ${pendingLogin.alias}` });
+                        return;
+                    }
                     const flow = await createAuthorizationFlow();
                     const body = await readJsonBody(req);
                     const actor = body.actor || 'dashboard';
-                    loginAccount(alias, flow)
+                    loginAccount(alias, flow, { timeoutMs: LOGIN_TIMEOUT_MS })
                         .then(() => {
                         logInfo(`Re-auth completed for ${alias} by ${actor}`);
                         // Update account metadata

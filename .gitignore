@@ -10,3 +10,4 @@ node
 # Auto-login
 auto-login/credentials.json
 auto-login/debug_*.png
+auto-login/__pycache__/

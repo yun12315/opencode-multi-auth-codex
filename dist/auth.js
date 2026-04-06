@@ -61,17 +61,30 @@ async function findAvailablePort(server, ports) {
     }
     throw new Error(`All ports ${ports.join(', ')} are in use. Stop Codex CLI if running.`);
 }
-export async function loginAccount(alias, flow) {
+export async function loginAccount(alias, flow, options) {
     const ports = DEFAULT_REDIRECT_PORTS;
     let activeFlow = flow;
     let server = null;
-    let actualPort;
+    const timeoutMs = Math.max(30_000, options?.timeoutMs ?? 5 * 60 * 1000);
     return new Promise(async (resolve, reject) => {
+        let finished = false;
+        let timeout = null;
         const cleanup = () => {
+            if (timeout) {
+                clearTimeout(timeout);
+                timeout = null;
+            }
             if (server) {
                 server.close();
                 server = null;
             }
+        };
+        const finish = (fn) => {
+            if (finished)
+                return;
+            finished = true;
+            cleanup();
+            fn();
         };
         server = http.createServer(async (req, res) => {
             if (!req.url?.startsWith('/auth/callback')) {
@@ -82,8 +95,7 @@ export async function loginAccount(alias, flow) {
             if (!activeFlow) {
                 res.writeHead(500);
                 res.end('No active flow');
-                cleanup();
-                reject(new Error('No active flow'));
+                finish(() => reject(new Error('No active flow')));
                 return;
             }
             const parsedUrl = url.parse(req.url, true);
@@ -92,15 +104,13 @@ export async function loginAccount(alias, flow) {
             if (!code) {
                 res.writeHead(400);
                 res.end('No authorization code received');
-                cleanup();
-                reject(new Error('No authorization code'));
+                finish(() => reject(new Error('No authorization code')));
                 return;
             }
             if (returnedState && returnedState !== activeFlow.state) {
                 res.writeHead(400);
                 res.end('Invalid state');
-                cleanup();
-                reject(new Error('Invalid state'));
+                finish(() => reject(new Error('Invalid state')));
                 return;
             }
             try {
@@ -165,18 +175,16 @@ export async function loginAccount(alias, flow) {
             </body>
           </html>
         `);
-                cleanup();
-                resolve(account);
+                finish(() => resolve(account));
             }
             catch (err) {
                 res.writeHead(500);
                 res.end('Authentication failed');
-                cleanup();
-                reject(err);
+                finish(() => reject(err));
             }
         });
         try {
-            actualPort = await findAvailablePort(server, ports);
+            const actualPort = await findAvailablePort(server, ports);
             if (!activeFlow || activeFlow.port !== actualPort) {
                 activeFlow = await createAuthorizationFlow(actualPort);
             }
@@ -186,14 +194,12 @@ export async function loginAccount(alias, flow) {
             console.log(`[multi-auth] Waiting for callback on port ${actualPort}...`);
         }
         catch (err) {
-            cleanup();
-            reject(err);
+            finish(() => reject(err));
             return;
         }
-        setTimeout(() => {
-            cleanup();
-            reject(new Error('Login timeout - no callback received'));
-        }, 5 * 60 * 1000);
+        timeout = setTimeout(() => {
+            finish(() => reject(new Error(`Login timeout after ${Math.round(timeoutMs / 1000)}s - no callback received`)));
+        }, timeoutMs);
     });
 }
 export async function refreshToken(alias) {
