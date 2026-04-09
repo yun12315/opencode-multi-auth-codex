@@ -77,29 +77,13 @@ Multi-account OAuth rotation plugin for OpenCode with a local dashboard, force m
 
 ### Plugin install (recommended)
 
-Use the GitHub source install for now:
+Install from npm:
 
 ```bash
-opencode plugin github:guard22/opencode-multi-auth-codex --global
+opencode plugin npm:@guard22/opencode-multi-auth-codex@latest --global
 ```
 
 If you prefer config-based installation, OpenCode also supports:
-
-```json
-{
-  "plugin": ["github:guard22/opencode-multi-auth-codex"]
-}
-```
-
-### npm package status
-
-The package name is reserved as `@guard22/opencode-multi-auth-codex`, but the npm package is **not published yet**.
-
-So these commands do **not** work yet:
-
-```bash
-opencode plugin @guard22/opencode-multi-auth-codex@latest --global
-```
 
 ```json
 {
@@ -107,7 +91,23 @@ opencode plugin @guard22/opencode-multi-auth-codex@latest --global
 }
 ```
 
-Once npm publishing is wired and a package is actually published, those commands can become the recommended path again.
+Package:
+- npm: [@guard22/opencode-multi-auth-codex](https://www.npmjs.com/package/@guard22/opencode-multi-auth-codex)
+- repo: [guard22/opencode-multi-auth-codex](https://github.com/guard22/opencode-multi-auth-codex)
+
+### GitHub source install (fallback)
+
+Use this if you want the repo head instead of the latest npm release:
+
+```bash
+opencode plugin github:guard22/opencode-multi-auth-codex --global
+```
+
+```json
+{
+  "plugin": ["github:guard22/opencode-multi-auth-codex"]
+}
+```
 
 OpenCode support:
 - OpenCode `1.2.19+` includes built-in `gpt-5.4`
@@ -119,7 +119,8 @@ export OPENCODE_MULTI_AUTH_INJECT_MODELS=0
 ```
 
 Update existing installs:
-- rerun `opencode plugin github:guard22/opencode-multi-auth-codex --global`
+- npm install: rerun `opencode plugin npm:@guard22/opencode-multi-auth-codex@latest --global`
+- GitHub install: rerun `opencode plugin github:guard22/opencode-multi-auth-codex --global`
 - restart OpenCode after updating the plugin
 - if your install is pinned to a specific tag/commit, bump it explicitly before testing new models
 
