@@ -80,14 +80,14 @@ Multi-account OAuth rotation plugin for OpenCode with a local dashboard, force m
 Install from npm:
 
 ```bash
-opencode plugin npm:@guard22/opencode-multi-auth-codex@latest --global
+opencode plugin @guard22/opencode-multi-auth-codex@latest --global
 ```
 
 If you prefer config-based installation, OpenCode also supports:
 
 ```json
 {
-  "plugin": ["npm:@guard22/opencode-multi-auth-codex@latest"]
+  "plugin": ["@guard22/opencode-multi-auth-codex@latest"]
 }
 ```
 
@@ -119,7 +119,7 @@ export OPENCODE_MULTI_AUTH_INJECT_MODELS=0
 ```
 
 Update existing installs:
-- npm install: rerun `opencode plugin npm:@guard22/opencode-multi-auth-codex@latest --global`
+- npm install: rerun `opencode plugin @guard22/opencode-multi-auth-codex@latest --global`
 - GitHub install: rerun `opencode plugin github:guard22/opencode-multi-auth-codex --global`
 - restart OpenCode after updating the plugin
 - if your install is pinned to a specific tag/commit, bump it explicitly before testing new models
