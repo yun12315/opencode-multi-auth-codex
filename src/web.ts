@@ -838,6 +838,73 @@ const HTML = `<!doctype html>
         font-family: inherit;
         font-size: 13px;
       }
+      .weights-panel {
+        margin-top: 14px;
+        padding: 14px;
+        background: var(--panel-2);
+        border: 1px solid var(--border-soft);
+        border-radius: 14px;
+        display: grid;
+        gap: 12px;
+      }
+      .weights-header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .weights-title {
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .weights-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .weights-grid {
+        display: grid;
+        gap: 10px;
+      }
+      .weight-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 120px;
+        gap: 10px;
+        align-items: center;
+      }
+      .weight-row label {
+        min-width: 0;
+        display: grid;
+        gap: 2px;
+      }
+      .weight-alias {
+        font-size: 13px;
+        font-weight: 600;
+        word-break: break-word;
+      }
+      .weight-meta {
+        font-size: 12px;
+        color: var(--muted);
+        word-break: break-word;
+      }
+      .weight-input {
+        width: 100%;
+        background: var(--panel-3);
+        border: 1px solid var(--border-soft);
+        border-radius: 10px;
+        padding: 10px 12px;
+        color: var(--text);
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 13px;
+      }
+      .weights-summary {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        color: var(--muted);
+        font-size: 12px;
+      }
       @media (max-width: 720px) {
         header { padding: 26px 18px 10px; }
         .header-bar { flex-direction: column; align-items: stretch; }
@@ -846,6 +913,7 @@ const HTML = `<!doctype html>
         .modal-shell { padding: 16px; }
         .modal-actions { flex-direction: column-reverse; }
         button { width: 100%; }
+        .weight-row { grid-template-columns: 1fr; }
       }
     </style>
   </head>
@@ -935,6 +1003,22 @@ const HTML = `<!doctype html>
         </div>
         <div id="forceStatus" class="notice"></div>
         <div id="rotationStrategyStatus" class="notice"></div>
+        <div class="weights-panel" id="weightsPanel">
+          <div class="weights-header">
+            <div>
+              <div class="weights-title">Account weights</div>
+              <div class="notice">Edit per-account share for <code>weighted-round-robin</code>. Disabled accounts are ignored during rotation.</div>
+            </div>
+            <div class="weights-actions">
+              <button class="secondary small" id="weightsEqualBtn" type="button">Split evenly</button>
+              <button class="secondary small" id="weightsNormalizeBtn" type="button">Normalize</button>
+              <button class="small" id="weightsSaveBtn" type="button">Save weights</button>
+            </div>
+          </div>
+          <div class="weights-summary" id="weightsSummary"></div>
+          <div class="weights-grid" id="weightsGrid"></div>
+          <div class="notice" id="weightsStatus"></div>
+        </div>
       </section>
       
       <!-- Phase G: Antigravity section - conditionally rendered based on feature flag -->
@@ -1061,12 +1145,21 @@ const HTML = `<!doctype html>
       const rotationStrategySelect = document.getElementById('rotationStrategySelect')
       const rotationStrategyStatus = document.getElementById('rotationStrategyStatus')
       const rotationStrategyHelpIcon = document.getElementById('rotationStrategyHelpIcon')
+      const weightsPanel = document.getElementById('weightsPanel')
+      const weightsGrid = document.getElementById('weightsGrid')
+      const weightsSummary = document.getElementById('weightsSummary')
+      const weightsStatus = document.getElementById('weightsStatus')
+      const weightsEqualBtn = document.getElementById('weightsEqualBtn')
+      const weightsNormalizeBtn = document.getElementById('weightsNormalizeBtn')
+      const weightsSaveBtn = document.getElementById('weightsSaveBtn')
 
       let latestState = null
       let pollTimer = null
       let pollIntervalMs = 0
       let createAccountModalOpen = false
       let createAccountTrackedEmail = ''
+      let weightDraft = null
+      let weightDraftDirty = false
       const rotationStrategyHelp = {
         'round-robin': 'Cycle through enabled accounts in order.',
         'least-used': 'Prefer the enabled account with the lowest usage count.',
@@ -1095,6 +1188,172 @@ const HTML = `<!doctype html>
 
       function describeRotationStrategy(strategy) {
         return rotationStrategyHelp[strategy] || 'Rotation strategy controls how the next account is selected.'
+      }
+
+      function getEnabledAccounts(accounts) {
+        return (accounts || []).filter((acc) => acc.enabled !== false)
+      }
+
+      function getDefaultWeightMap(accounts) {
+        const enabledAccounts = getEnabledAccounts(accounts)
+        if (enabledAccounts.length === 0) return {}
+        const weight = 1 / enabledAccounts.length
+        return enabledAccounts.reduce((acc, account) => {
+          acc[account.alias] = weight
+          return acc
+        }, {})
+      }
+
+      function buildWeightDraft(state, preferred) {
+        const accounts = Array.isArray(state?.accounts) ? state.accounts : []
+        const enabledAliases = new Set(getEnabledAccounts(accounts).map((acc) => acc.alias))
+        const source = preferred && typeof preferred === 'object'
+          ? preferred
+          : ((state?.accountWeights && Object.keys(state.accountWeights).length > 0)
+            ? state.accountWeights
+            : getDefaultWeightMap(accounts))
+
+        const draft = {}
+        for (const alias of enabledAliases) {
+          const value = Number(source[alias])
+          draft[alias] = Number.isFinite(value) && value > 0 ? value : 0
+        }
+        return draft
+      }
+
+      function getWeightDraft(state) {
+        if (!state) return {}
+        if (!weightDraftDirty || !weightDraft) {
+          weightDraft = buildWeightDraft(state)
+          weightDraftDirty = false
+          return weightDraft
+        }
+        weightDraft = buildWeightDraft(state, weightDraft)
+        return weightDraft
+      }
+
+      function sumWeights(weights) {
+        return Object.values(weights || {}).reduce((sum, value) => sum + (Number(value) || 0), 0)
+      }
+
+      function formatWeight(value) {
+        return (Number(value) || 0).toFixed(4)
+      }
+
+      function setWeightsStatus(message, isError) {
+        if (!weightsStatus) return
+        weightsStatus.textContent = message || ''
+        weightsStatus.style.color = isError ? 'var(--danger)' : 'var(--muted)'
+      }
+
+      function renderWeights(state) {
+        if (!weightsPanel || !weightsGrid || !weightsSummary) return
+
+        const accounts = getEnabledAccounts(state?.accounts)
+        const strategy = state?.rotationStrategy || 'round-robin'
+        weightsPanel.style.opacity = strategy === 'weighted-round-robin' ? '1' : '0.82'
+
+        if (accounts.length === 0) {
+          weightsGrid.innerHTML = '<div class="notice">No enabled accounts available for weighting.</div>'
+          weightsSummary.innerHTML = ''
+          if (!weightDraftDirty) {
+            setWeightsStatus('Enable at least one account to edit weights.', false)
+          }
+          return
+        }
+
+        const draft = getWeightDraft(state)
+        const total = sumWeights(draft)
+        const strategyNote = strategy === 'weighted-round-robin'
+          ? 'Active now.'
+          : 'Saved now, used when strategy is weighted-round-robin.'
+
+        weightsSummary.innerHTML = '' +
+          '<span>Enabled: ' + accounts.length + '</span>' +
+          '<span>Total: ' + formatWeight(total) + '</span>' +
+          '<span>' + strategyNote + '</span>'
+
+        weightsGrid.innerHTML = accounts.map((acc) => {
+          const value = draft[acc.alias] ?? 0
+          return '' +
+            '<div class="weight-row">' +
+              '<label for="weight-' + escapeHtml(acc.alias) + '">' +
+                '<span class="weight-alias">' + escapeHtml(acc.alias) + '</span>' +
+                '<span class="weight-meta">' + escapeHtml(acc.email || 'unknown account') + '</span>' +
+              '</label>' +
+              '<input class="weight-input" id="weight-' + escapeHtml(acc.alias) + '" data-weight-alias="' + escapeHtml(acc.alias) + '" inputmode="decimal" value="' + escapeHtml(formatWeight(value)) + '" />' +
+            '</div>'
+        }).join('')
+
+        if (!weightDraftDirty) {
+          if (Math.abs(total - 1) <= 0.01) {
+            setWeightsStatus('Weights are valid. ' + strategyNote, false)
+          } else {
+            setWeightsStatus('Weights should add up to 1.0000 before saving.', true)
+          }
+        }
+      }
+
+      function readWeightInputs() {
+        const result = {}
+        const inputs = weightsGrid ? weightsGrid.querySelectorAll('input[data-weight-alias]') : []
+        for (const input of inputs) {
+          const alias = input.dataset.weightAlias
+          if (!alias) continue
+          const value = Number.parseFloat((input.value || '').trim())
+          result[alias] = Number.isFinite(value) ? value : NaN
+        }
+        return result
+      }
+
+      function syncWeightDraftFromInputs() {
+        weightDraft = readWeightInputs()
+        weightDraftDirty = true
+        const total = sumWeights(weightDraft)
+        if (weightsSummary) {
+          const summaryBits = Array.from(weightsSummary.querySelectorAll('span'))
+          if (summaryBits[1]) {
+            summaryBits[1].textContent = 'Total: ' + formatWeight(total)
+          }
+        }
+        if (Object.values(weightDraft).some((value) => !Number.isFinite(value) || value <= 0)) {
+          setWeightsStatus('Each weight must be a number greater than 0.', true)
+          return
+        }
+        if (Math.abs(total - 1) > 0.01) {
+          setWeightsStatus('Weights should add up to 1.0000 before saving.', true)
+          return
+        }
+        setWeightsStatus('Weights are ready to save.', false)
+      }
+
+      function writeWeightDraft(draft) {
+        weightDraft = { ...draft }
+        weightDraftDirty = true
+        const inputs = weightsGrid ? weightsGrid.querySelectorAll('input[data-weight-alias]') : []
+        for (const input of inputs) {
+          const alias = input.dataset.weightAlias
+          if (!alias) continue
+          input.value = formatWeight(weightDraft[alias] ?? 0)
+        }
+        syncWeightDraftFromInputs()
+      }
+
+      function createEvenWeights(state) {
+        return getDefaultWeightMap(state?.accounts)
+      }
+
+      function normalizeWeightDraft(state) {
+        const draft = buildWeightDraft(state, readWeightInputs())
+        const positiveEntries = Object.entries(draft).filter(([, value]) => Number.isFinite(value) && value > 0)
+        if (positiveEntries.length === 0) {
+          return createEvenWeights(state)
+        }
+        const total = positiveEntries.reduce((sum, [, value]) => sum + value, 0)
+        return positiveEntries.reduce((acc, [alias, value]) => {
+          acc[alias] = value / total
+          return acc
+        }, {})
       }
 
       function renderControlHelp(strategy) {
@@ -1800,6 +2059,7 @@ const HTML = `<!doctype html>
         renderAutoLoginControls(state)
         renderCreateAccountModal(state)
         renderAntigravity(state)
+        renderWeights(state)
         updatePolling(state.queue)
         await renderForceMode()
       }
@@ -2303,6 +2563,66 @@ const HTML = `<!doctype html>
             showToast('Error: ' + err.message)
           } finally {
             rotationStrategySelect.disabled = false
+          }
+        })
+      }
+
+      if (weightsGrid) {
+        weightsGrid.addEventListener('input', (event) => {
+          const target = event.target
+          if (!(target instanceof HTMLInputElement) || !target.dataset.weightAlias) return
+          syncWeightDraftFromInputs()
+        })
+      }
+
+      if (weightsEqualBtn) {
+        weightsEqualBtn.addEventListener('click', () => {
+          if (!latestState) return
+          writeWeightDraft(createEvenWeights(latestState))
+        })
+      }
+
+      if (weightsNormalizeBtn) {
+        weightsNormalizeBtn.addEventListener('click', () => {
+          if (!latestState) return
+          writeWeightDraft(normalizeWeightDraft(latestState))
+        })
+      }
+
+      if (weightsSaveBtn) {
+        weightsSaveBtn.addEventListener('click', async () => {
+          if (!latestState) return
+          const accountWeights = normalizeWeightDraft(latestState)
+          const invalid = Object.values(accountWeights).some((value) => !Number.isFinite(value) || value <= 0)
+          const total = sumWeights(accountWeights)
+          if (invalid || Object.keys(accountWeights).length === 0) {
+            setWeightsStatus('Enter at least one valid weight before saving.', true)
+            return
+          }
+          if (Math.abs(total - 1) > 0.01) {
+            setWeightsStatus('Weights must add up to 1.0000 before saving.', true)
+            return
+          }
+
+          weightsSaveBtn.disabled = true
+          try {
+            await api('/api/settings', {
+              method: 'PUT',
+              body: JSON.stringify({
+                accountWeights,
+                actor: 'dashboard'
+              })
+            })
+            weightDraft = { ...accountWeights }
+            weightDraftDirty = false
+            setWeightsStatus('Weights saved.', false)
+            showToast('Weights saved')
+            await refreshState()
+          } catch (err) {
+            setWeightsStatus('Save failed: ' + err.message, true)
+            showToast('Error: ' + err.message)
+          } finally {
+            weightsSaveBtn.disabled = false
           }
         })
       }
@@ -3338,6 +3658,7 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
         logPath: getLogPath(),
         autoLogin,
         rotationStrategy: runtimeSettings.settings.rotationStrategy,
+        accountWeights: runtimeSettings.settings.accountWeights,
         force: {
           active: forceActive,
           alias: forceState.forcedAlias,
