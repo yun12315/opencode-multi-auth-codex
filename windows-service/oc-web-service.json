@@ -1,0 +1,9 @@
+{
+  "ExecutablePath": "F:\\Program Files\\nodejs\\node.exe",
+  "Arguments": ".\\dist\\cli.js web --port 3434 --host 127.0.0.1",
+  "WorkingDirectory": "G:\\workspace\\opencode-multi-auth-codex",
+  "LogPath": "G:\\workspace\\opencode-multi-auth-codex\\windows-service\\oc-web-service.log",
+  "UserProfile": "C:\\Users\\Administrator",
+  "AppData": "C:\\Users\\Administrator\\AppData\\Roaming",
+  "LocalAppData": "C:\\Users\\Administrator\\AppData\\Local"
+}
